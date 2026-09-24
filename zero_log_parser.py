@@ -1943,11 +1943,14 @@ class Gen2:
     #                populated while the pack is at rest; reads 0 otherwise
     #   +4   u16 LE  high cell voltage, mV
     #   +6   u8      state of charge, 0-100%
-    #   +7   i16 LE  battery current, mA (negative = charging)
+    #   +7   i32 LE  battery current, mA (negative = charging)
     #  +25   u24 LE  pack voltage, mV
-    #  +30   u8      BMS temperature, degrees C (only present in the
-    #                longer length variant of each tier - absent from
-    #                0x4B's 43-byte variant, always present otherwise)
+    #
+    # A byte at +30 was previously read as BMS temperature; dropped
+    # 2026-09-24 (analysis/bms_fst_offset_shift_test.md correction section)
+    # - the external source that suggested it retracted the reading and no
+    # independent confirmation could be found in this file set. The byte
+    # stays in raw_hex, undecoded.
     # message_type -> (block shift, valid payload lengths for this tier)
     BMS_CELL_TELEMETRY_TIERS = {
         0x4b: (0, (43, 45)),
@@ -1961,13 +1964,14 @@ class Gen2:
         """Types 0x4B/0x4C/0x4D, BMS side - cell telemetry snapshot.
 
         Decodes low/unloaded-low/high cell voltage, state of charge,
-        battery current, pack voltage and (length permitting) BMS
-        temperature, plus the shared 6-byte prefix. Every other byte is
-        unidentified and is kept as-is in raw_hex rather than guessed at.
-        A payload whose length is not one of the two confirmed lengths for
-        its tier, or whose sub-second prefix value is out of range, falls
-        back to the raw-hex report unhandled_entry_format() already gives
-        these types. See analysis/bms_fst_offset_shift_test.md.
+        battery current and pack voltage, plus the shared 6-byte prefix.
+        Every other byte, including the one previously read as a BMS
+        temperature (see analysis/bms_fst_offset_shift_test.md's
+        2026-09-24 correction), is unidentified and is kept as-is in
+        raw_hex rather than guessed at. A payload whose length is not one
+        of the two confirmed lengths for its tier, or whose sub-second
+        prefix value is out of range, falls back to the raw-hex report
+        unhandled_entry_format() already gives these types.
         """
         shift, valid_lengths = cls.BMS_CELL_TELEMETRY_TIERS[message_type]
         if len(x) not in valid_lengths:
@@ -1982,7 +1986,7 @@ class Gen2:
         voltage_unloaded = BinaryTools.unpack('uint16', x, base + 2)
         voltage_high = BinaryTools.unpack('uint16', x, base + 4)
         soc = BinaryTools.unpack('uint8', x, base + 6)
-        current_ma = BinaryTools.unpack('int16', x, base + 7)
+        current_ma = BinaryTools.unpack('int32', x, base + 7)
         pack_voltage_mv = int.from_bytes(bytes(x[base + 25:base + 28]), 'little')
 
         structured_data = dict(prefix)
@@ -1995,10 +1999,6 @@ class Gen2:
             'pack_voltage_volts': pack_voltage_mv / 1000.0,
         })
 
-        temp_offset = base + 30
-        if temp_offset < len(x):
-            structured_data['bms_temp_celsius'] = BinaryTools.unpack('uint8', x, temp_offset)
-
         structured_data['raw_hex'] = bytes(x).hex()
 
         conditions = (
@@ -2006,8 +2006,6 @@ class Gen2:
             f"Vpack:{structured_data['pack_voltage_volts']:.3f}V, "
             f"I:{structured_data['battery_current_amps']:.3f}A"
         )
-        if 'bms_temp_celsius' in structured_data:
-            conditions += f", BT:{structured_data['bms_temp_celsius']}C"
 
         return {
             'event': 'BMS Cell Telemetry',
