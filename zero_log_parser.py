@@ -3904,7 +3904,9 @@ class LogData(object):
                 'initial_date': self.header_info.get('Initial date', 'Unknown'),
                 'model': self.header_info.get('Model', 'Unknown'),
                 'firmware_rev': self.header_info.get('Firmware rev.', 'Unknown'),
-                'board_rev': self.header_info.get('Board rev.', 'Unknown')
+                'board_rev': self.header_info.get('Board rev.', 'Unknown'),
+                'bms_serial_number': self.header_info.get('BMS serial number', 'Unknown'),
+                'pack_serial_number': self.header_info.get('Pack serial number', 'Unknown')
             },
             'entries': []
         }
