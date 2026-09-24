@@ -34,7 +34,7 @@ FIELD_BASE = Gen2.BMS_CELL_TELEMETRY_FIELD_BASE
 
 def _payload(message_type, length=None, subsecond=123000, prefix=0x02e6,
              voltage_low=3700, voltage_unloaded=3750, voltage_high=3720,
-             soc=85, current_ma=-1500, pack_voltage_mv=103_800, temp_c=22):
+             soc=85, current_ma=-1500, pack_voltage_mv=103_800):
     shift, valid_lengths = TIERS[message_type]
     if length is None:
         length = valid_lengths[-1]  # the longer variant, carries every field
@@ -50,14 +50,29 @@ def _payload(message_type, length=None, subsecond=123000, prefix=0x02e6,
         struct.pack_into('<H', buf, base + 4, voltage_high)
     if base + 6 + 1 <= length:
         buf[base + 6] = soc
-    if base + 7 + 2 <= length:
-        struct.pack_into('<h', buf, base + 7, current_ma)
+    if base + 7 + 4 <= length:
+        struct.pack_into('<i', buf, base + 7, current_ma)
     if base + 25 + 3 <= length:
         pv_bytes = pack_voltage_mv.to_bytes(3, 'little')
         buf[base + 25:base + 28] = pv_bytes
-    if base + 30 + 1 <= length:
-        buf[base + 30] = temp_c & 0xff
     return buf
+
+
+def _hex(s):
+    return bytearray(bytes.fromhex(s.replace(' ', '')))
+
+
+# 20211207-16.29-538ZFBZ74LCL14018-10.bin, record timestamp 1638840771
+# (2021-12-06 20:32:51): a real 0x4B (43-byte, short variant) entry whose
+# current is 92,652 mA (92.652 A), 2.83x past the int16 limit (32,767 mA)
+# the field was previously clipped to. Every other field cross-checked by
+# hand against this same payload: cv_low 3,425 mV, cv_high 3,467 mV
+# (28-cell pack voltage envelope 95,900-97,076 mV), soc 79%, pack_voltage
+# 96,468 mV - inside that envelope.
+SAMPLE_4B_WIDE_CURRENT = _hex(
+    '4090020048f90000000000000000610ddf0f8b0d4fec6901000dd8f3070e'
+    '000000000000000007d4780100'
+)
 
 
 def test_each_tier_decodes_the_core_fields():
@@ -80,22 +95,26 @@ def test_negative_current_means_charging_by_sign():
     assert out['structured_data']['battery_current_amps'] == 1.800
 
 
-def test_short_0x4b_variant_omits_temperature():
-    # The 43-byte 0x4B variant is too short to hold the temperature byte
-    # (which needs offset 44); the 45-byte variant holds it.
-    short = Gen2.bms_cell_telemetry(0x4b, _payload(0x4b, length=43))
-    assert 'bms_temp_celsius' not in short['structured_data']
-    long = Gen2.bms_cell_telemetry(0x4b, _payload(0x4b, length=45))
-    assert long['structured_data']['bms_temp_celsius'] == 22
+def test_current_is_a_32bit_field_not_16bit():
+    # A real sample (see SAMPLE_4B_WIDE_CURRENT above) whose current is
+    # 92,652 mA - 2.83x past the int16 limit (32,767 mA) the field was
+    # previously clipped to. This is only readable at all if the decoder
+    # reads a 4-byte int32, not a 2-byte int16.
+    out = Gen2.bms_cell_telemetry(0x4b, SAMPLE_4B_WIDE_CURRENT)
+    sd = out['structured_data']
+    assert sd['battery_current_amps'] == 92.652
+    assert sd['voltage_low_cell_volts'] == 3.425
+    assert sd['voltage_high_cell_volts'] == 3.467
+    assert sd['state_of_charge_percent'] == 79
+    assert sd['pack_voltage_volts'] == 96.468
 
 
-def test_0x4c_and_0x4d_always_include_temperature():
-    for message_type, (shift, lengths) in TIERS.items():
-        if message_type == 0x4b:
-            continue
-        for length in lengths:
-            out = Gen2.bms_cell_telemetry(message_type, _payload(message_type, length=length))
-            assert 'bms_temp_celsius' in out['structured_data'], (message_type, length)
+def test_no_field_is_named_temperature():
+    # The temperature label was dropped 2026-09-24 (no independent
+    # confirmation found in the file set); the byte stays undecoded.
+    for message_type in TIERS:
+        out = Gen2.bms_cell_telemetry(message_type, _payload(message_type))
+        assert not any('temp' in key.lower() for key in out['structured_data'])
 
 
 def test_raw_hex_preserves_the_whole_payload():
