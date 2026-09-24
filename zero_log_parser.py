@@ -3894,13 +3894,17 @@ class LogData(object):
                 'timezone': f'UTC{self.timezone_offset/3600:+.1f}' if self.timezone_offset else 'UTC+0.0',
                 'total_entries': len(processed_entries)
             },
+            # Same source the text output's header block prints
+            # (self.header_info, from get_version_and_header); nothing ever
+            # set self.vin etc., so the old getattr() reads were always
+            # 'Unknown'. See analysis/json_emitter_fix.md.
             'log_info': {
-                'vin': getattr(self, 'vin', 'Unknown'),
-                'serial_number': getattr(self, 'serial_number', 'Unknown'),
-                'initial_date': getattr(self, 'initial_date', 'Unknown'),
-                'model': getattr(self, 'model', 'Unknown'),
-                'firmware_rev': getattr(self, 'firmware_rev', 'Unknown'),
-                'board_rev': getattr(self, 'board_rev', 'Unknown')
+                'vin': self.header_info.get('VIN', 'Unknown'),
+                'serial_number': self.header_info.get('Serial number', 'Unknown'),
+                'initial_date': self.header_info.get('Initial date', 'Unknown'),
+                'model': self.header_info.get('Model', 'Unknown'),
+                'firmware_rev': self.header_info.get('Firmware rev.', 'Unknown'),
+                'board_rev': self.header_info.get('Board rev.', 'Unknown')
             },
             'entries': []
         }
