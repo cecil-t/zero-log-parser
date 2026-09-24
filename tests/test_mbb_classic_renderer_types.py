@@ -93,6 +93,14 @@ def test_0x3d_is_capacitor_voltage_not_module_number():
     assert 'contactor' not in e['event'].lower()
 
 
+def test_0x3d_four_byte_form_log_level_is_warning_not_error():
+    # determine_log_level() would call this ERROR on the word "Failed" in
+    # the event name alone - a side effect of the 2026-09-24 rename, not a
+    # deliberate severity choice. The decoder now overrides it explicitly.
+    e = _decode(0x3d, SAMPLE_3D)
+    assert e['log_level'] == 'WARNING'
+
+
 def test_0x3d_one_byte_form_is_still_module_contactor_closed():
     e = _decode(0x3d, SAMPLE_3D_CONTACTOR_CLOSED)
     assert e['event'] == 'Battery module 00 contactor closed'

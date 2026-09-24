@@ -2302,7 +2302,14 @@ class Gen2:
             'structured_data': {
                 'capacitor_voltage_volts': capacitor_volt,
             },
-            'conditions': 'vcap: {vcap:.3f}V. Restarting Sevcon.'.format(vcap=capacitor_volt)
+            'conditions': 'vcap: {vcap:.3f}V. Restarting Sevcon.'.format(vcap=capacitor_volt),
+            # Explicit override: determine_log_level() would otherwise read
+            # 'FAILED' in the event name and call this ERROR, a side effect
+            # of the renaming rather than a deliberate severity choice. Its
+            # sibling event, "Precharge Decay Too Steep. Restarting
+            # Sevcon.", renders INFO; WARNING is the closest real level to
+            # that for an abnormal-but-recovered condition.
+            'log_level': 'WARNING',
         }
 
     @classmethod
