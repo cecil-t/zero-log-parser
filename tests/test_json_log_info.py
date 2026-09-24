@@ -20,7 +20,12 @@ values asserted below are what the parser really decodes for those files:
   whole 128-byte file
 - REV1 BMS: 538SD5Z27ECB04404_BMS0_2021-02-27.bin, first 0x800 bytes; a
   BMS header carries no VIN, model, firmware or board rev, so those must
-  stay 'Unknown' while initial_date is filled in
+  stay 'Unknown' while initial_date, bms_serial_number and
+  pack_serial_number are filled in
+
+bms_serial_number and pack_serial_number (added after the first fix) read
+header_info's 'BMS serial number' and 'Pack serial number'; MBB headers
+carry neither key, so the three MBB samples check both stay 'Unknown'.
 """
 
 import base64
@@ -88,7 +93,9 @@ REV1_BMS = (
 
 LOG_INFO_KEYS = [('vin', 'VIN'), ('serial_number', 'Serial number'),
                  ('initial_date', 'Initial date'), ('model', 'Model'),
-                 ('firmware_rev', 'Firmware rev.'), ('board_rev', 'Board rev.')]
+                 ('firmware_rev', 'Firmware rev.'), ('board_rev', 'Board rev.'),
+                 ('bms_serial_number', 'BMS serial number'),
+                 ('pack_serial_number', 'Pack serial number')]
 
 
 def _json_for(sample, suffix):
@@ -119,7 +126,8 @@ def test_rev0_mbb():
     assert j['log_info'] == {
         'vin': '538SM5Z26ECA03998', 'serial_number': '2014_mbb_0386e1_00603',
         'initial_date': 'Sep 22 2017 14:18:52', 'model': 'SS',
-        'firmware_rev': 53, 'board_rev': 3}
+        'firmware_rev': 53, 'board_rev': 3,
+        'bms_serial_number': 'Unknown', 'pack_serial_number': 'Unknown'}
     _assert_matches_header(ld, j)
 
 
@@ -129,7 +137,8 @@ def test_rev1_mbb():
     assert j['log_info'] == {
         'vin': '538SMCZ66HCG07739', 'serial_number': 'sj4216zer0653',
         'initial_date': 'Aug  9 2019 14:21:01', 'model': 'SR',
-        'firmware_rev': 29, 'board_rev': 1956}
+        'firmware_rev': 29, 'board_rev': 1956,
+        'bms_serial_number': 'Unknown', 'pack_serial_number': 'Unknown'}
     _assert_matches_header(ld, j)
 
 
@@ -139,15 +148,17 @@ def test_rev3_gen3_mbb():
     assert j['log_info'] == {
         'vin': '538ZFAZ75LCK12639', 'serial_number': 'Unknown',
         'initial_date': 'Unknown', 'model': 'SRF',
-        'firmware_rev': 14, 'board_rev': 2}
+        'firmware_rev': 14, 'board_rev': 2,
+        'bms_serial_number': 'Unknown', 'pack_serial_number': 'Unknown'}
     _assert_matches_header(ld, j)
 
 
-def test_rev1_bms_absent_keys_stay_unknown():
+def test_rev1_bms_serials_and_absent_keys():
     ld, j = _json_for(REV1_BMS, '_BMS0.bin')
     assert ld.log_version == REV1
     assert j['log_info'] == {
         'vin': 'Unknown', 'serial_number': 'Unknown',
         'initial_date': 'Oct  5 2020 14:03:22', 'model': 'Unknown',
-        'firmware_rev': 'Unknown', 'board_rev': 'Unknown'}
+        'firmware_rev': 'Unknown', 'board_rev': 'Unknown',
+        'bms_serial_number': 'SJ0120ZER0405', 'pack_serial_number': '19tb1945'}
     _assert_matches_header(ld, j)
