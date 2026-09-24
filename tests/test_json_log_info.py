@@ -99,8 +99,12 @@ LOG_INFO_KEYS = [('vin', 'VIN'), ('serial_number', 'Serial number'),
 
 
 def _json_for(sample, suffix):
+    return _json_for_named(sample, 'sample' + suffix)
+
+
+def _json_for_named(sample, filename):
     d = tempfile.mkdtemp(prefix='jsonloginfo')
-    path = os.path.join(d, 'sample' + suffix)
+    path = os.path.join(d, filename)
     with open(path, 'wb') as f:
         f.write(zlib.decompress(base64.b64decode(sample)))
     try:
@@ -162,3 +166,94 @@ def test_rev1_bms_serials_and_absent_keys():
         'firmware_rev': 'Unknown', 'board_rev': 'Unknown',
         'bms_serial_number': 'SJ0120ZER0405', 'pack_serial_number': '19tb1945'}
     _assert_matches_header(ld, j)
+
+
+# metadata.log_type. It used to come only from the filename ('MBB' or 'Mbb'
+# in the path, else 'BMS'). It now uses LogFile.log_type (the MBB/BMS magic
+# string in the file itself, else a case-insensitive filename match) when
+# that is definite, and keeps the old filename test only when
+# LogFile.log_type is 'Unknown Type'. Real samples again, same encoding as
+# above; see analysis/json_emitter_fix.md, Addendum Part B.
+
+# 538SDKZ49PCB22860_MbbD_2026-08-11.bin, first 0x400 bytes: the headerless
+# file whose entry stream is MBB types followed by a stretch of BMS types.
+# No magic string anywhere, so every method falls back to its filename:
+# MBB before and after.
+MIXED = (
+    'eNqNU01v0zAYdroD7Q67IegFvYdNGgimdBtDi8ZhJA3iQIo2OPEhvMSkkVK7OMm2v7KKnSbB'
+    'gZs1ceAHwI1/FJXXbkZSDUEtOf54n/fJ68ePyd6UqDtbr8+XQ2KRRvt6ppc62it19FngDxwA'
+    'L8noUZrwGPqnOZOcpuAOY7DxS2XMJGwultD7k7BF1Fr5BhNeFpJr3MD3wXM9dwP8lMaZA/ap'
+    'bRPV7mgQFlvq8rz+k1dPHThgGcsdeCFOmHww4ER1tnXUshBuJsptwp+LqEgZZOGQjRiEQ8pj'
+    'FsEHKUYQCM5gJCIGuYCDgptS9FrLM5Pk56RW6NN0Op3JU0XnxKuj7XWzoVYNqkV+TeaA2Hq7'
+    '6dHDzZ1dom6Vby8bMgRGBaIeme3mgXMdd/cDG6LC1MukFBLGNMuSY1ZV7Zfv6rR/HLx5Vs11'
+    'mIvxGIMzlvbOe2Sx1I17FEd1t6Q16SE7DgUHV/CchjkW4En9+0GwoVXRQIt8n9R9Kb2ylN2k'
+    'qWqz7QZTkgEXJ+CmImPRFb5yVJ//14EL4OcM6JfRQlo1tbnuk8d/YTFI13CAJ1iGPsvxEj8W'
+    'iWT6baCAnIU5Uev3Y0zudvfJN5Rqjdyu7IGS3STLOHFaX1acFuIuKtw54lZJ9zrus8Z1tn9c'
+    '6jeNN2gmeCNmJBcNB6ZnvwGwtjDd'
+)
+
+# 538SD9Z32GCG05753_MBB_2026-04-29.bin, first 0x400 bytes: named MBB but a
+# real BMS log (BMS magic string, BMS header, BMS entry types).
+BMS_NAMED_MBB = (
+    'eNpz8g1m2OZXKjHl+lxGBoaFQOCWmqSgYKlgZGBormBoYGVgZmVizPAfDsDMclaR5TFA9RNm'
+    'SIBph9/qYcwMDAwJ4hBzLB2fqDMB+Yk220DSDGc5WXuBFENBWdB+EM19hgFsTt1Cpx9zgArW'
+    'z+D7CaInPo3mAOmHWwYF7c67wOq6lzKVsQD5b/ZdPw6yj6HjKwsDEfQi10JWbOJTAgJYGSgA'
+    '+/vfx1uAGK+M2EAUOxA/nc/IILydkcFoJiODwgJGhv5ljAxRWxgZWOsZGSZ1MzJo1zIy8FUz'
+    'MrQC2SubGBmebmJkKNjFyCC7lpGhbw0jww0gnb2RkeHsAUaGf/uBZp1jZLA7wshQuBto3mZG'
+    'hsxpjAxLFzIy+E1nZJCbzMiwSzKMIdDPjQPsoAhbFRBV61l59C8nA8PnmT965ylKMxicZGSY'
+    'bMHIEC7AxP2AMQHo5xqgKld+YExxWQBD2wSkCRi+TQ8mHTSe1uySCpT5Awzgos124PjI6fQH'
+    '0/ZAX5qxIfxvuyDjDEjcDUonCmMPp/+DFgCTuWl8Um5xvIlFapJJWryBkaGZEZLLDc0KU4wM'
+    'DS1xpQAsuQVZOwMHy+QDnMVWDgwNE1IZFgABVg2I3IU1qF5xH+FMFjjCWSQwS6CKl+FCBzCY'
+    'LwDTGog2Z7BheATUZ8TAzFDCx8DFz2DDzwWUdpCHqAGCAwmvII45oM4JYZzZLwmiuBgZAP/A'
+    'c0w='
+)
+
+# 20201001_23.06_538ZFBZ75LCL14318_ecuId[0].bin, the whole 128-byte file:
+# an FST MBB header ('MBB' magic at 0x0d) under a filename with no MBB in it.
+FST_ECUID = (
+    'eNrbVPr7dkJZvMJsDgaDP75OTgwQ8MIvOCiYARmYGltEuTlFmZv6OPsYmhgbWjAwBHsZmxla'
+    'RrkGGZiYGzFgAhMDXQMLQ0sLBhYGIYZURvO0ZPMU0xRUNQCmWRS+'
+)
+
+# 538SD4Z22DCB03041_MBB_2018-09-18.bin, first 0x400 bytes: printable junk
+# where the magic string would be, so LogFile.log_type is 'Unknown Type';
+# the filename test still applies and gives MBB.
+MBB_JUNK_MAGIC = (
+    'eNpbuHDhQq/SPAUFSwUjA0MzBUNTK2NzKwMThv9wAGZ2y85jAAEYrSzIwLCMi4HBmZGBYaO9'
+    'JIM0DwvD7RsiDK4nGRg4Yhng4P95BgZ2IP1GWQzM12dIZ3AA0nPEIfK6DxdEg+hTbAwMqexI'
+    '+tAAAxqYoQ6h56qjiiPUM4L50SwMDH/ZcJsLUsWIpH8e1LztuM39P5wAMNKN43OTkuKTEw0T'
+    'jSzjDQzMTc2Q/I2eNiytjA0YILQhSN7U2CLYxSTKyMjF2cnA2MAEKLjs5P5XC4AAS7IyQk5W'
+    'HMCAdwlGDeYUhjwGNwZvBo0wRgYZhhaGM+xMjDqMjIwpDEBC0EFgiuAmJg6gzp9AAwT4GBSB'
+    'oij6E15B6APqnGCaEZp0ArgZGASAUbqDGxrdMWqsIMpf0I1Bg4GLwYmBH2g31GHDK4bxAwDU'
+    'C0wc'
+)
+
+
+def test_log_type_mixed_content_file_stays_mbb():
+    ld, j = _json_for_named(MIXED, '538SDKZ49PCB22860_MbbD_2026-08-11.bin')
+    assert ld.log_file.log_type == 'MBB'
+    assert j['metadata']['log_type'] == 'MBB'
+
+
+def test_log_type_renamed_mbb_file_uses_magic():
+    # Same REV0 MBB bytes as test_rev0_mbb, under a name with no MBB in it
+    # (the real file is 10.12.18BikeLog.bin). The old test said BMS.
+    ld, j = _json_for_named(REV0_MBB, 'BikeLog.bin')
+    assert j['metadata']['log_type'] == 'MBB'
+
+
+def test_log_type_bms_file_named_mbb_uses_magic():
+    ld, j = _json_for_named(BMS_NAMED_MBB, '538SD9Z32GCG05753_MBB_2026-04-29.bin')
+    assert ld.log_file.log_type == 'BMS'
+    assert j['metadata']['log_type'] == 'BMS'
+
+
+def test_log_type_fst_ecuid_file_uses_magic():
+    ld, j = _json_for_named(FST_ECUID, '20201001_23.06_538ZFBZ75LCL14318_ecuId[0].bin')
+    assert j['metadata']['log_type'] == 'MBB'
+
+
+def test_log_type_unknown_magic_falls_back_to_filename():
+    ld, j = _json_for_named(MBB_JUNK_MAGIC, '538SD4Z22DCB03041_MBB_2018-09-18.bin')
+    assert ld.log_file.log_type == 'Unknown Type'
+    assert j['metadata']['log_type'] == 'MBB'
