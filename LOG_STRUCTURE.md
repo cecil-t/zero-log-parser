@@ -529,12 +529,35 @@ Offset | Length | Contents
 0x15   | 2      | ambient temperature
 0x17   | 4      | odometer
 
-### `0x3d` - Sevcon Failed To Fully Precharge
+### `0x3d` - two forms by length
+
+`0x3d` carries two different events depending on firmware era, told apart
+by payload length. Both are real: 4,681 entries in the file set are the
+1-byte form, almost all from 2013 model year bikes; the rest are the
+4-byte form.
+
+**1 byte - Battery module N contactor closed** (early firmware, 2013
+model year bikes)
+
+Offset | Length | Contents
+------ | :----: | --------
+0x00   | 1      | module number (uint8)
+
+This is the original upstream reading, unchanged. It typically follows a
+"Module N FETs are now Closed" / "Contactor took N ms to close" debug
+string.
+
+**4 bytes - Sevcon Failed To Fully Precharge**
+
 Offset | Length | Contents
 ------ | :----: | --------
 0x00   | 4      | controller capacitor voltage reached, mV (uint32)
 
-*Previously documented as "battery module contactor closed" with a 1-byte module number; every `0x3d` entry in the file set is 4 bytes. The value is the same firmware quantity `0x33` logs at offset `0x0e` (vcap), logged when the precharge percentage stays under 98%.*
+The value is the same firmware quantity `0x33` logs at offset `0x0e`
+(vcap), logged when the precharge percentage stays under 98%. Before this
+was found, every `0x3d` entry (both forms) was misread as the 1-byte
+module-number event, which gave 4-byte entries nonsense like "Battery
+module 233 contactor closed".
 
 ### `0x3e` - cell voltages
 Offset | Length | Contents
