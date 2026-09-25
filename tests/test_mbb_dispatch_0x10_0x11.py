@@ -29,14 +29,17 @@ plumbing (parse_entry's own signature, LogData's own call site) rather
 than any one payload's fields.
 """
 
+import base64
 import logging
 import os
 import struct
 import sys
+import tempfile
+import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from zero_log_parser import Gen2, LogFile
+from zero_log_parser import Gen2, LogFile, LogData
 
 
 def _hex(s):
@@ -203,3 +206,141 @@ def test_parse_entry_real_bms_payloads_unchanged_with_bms_log_type():
         _length, entry, _unhandled = Gen2.parse_entry(raw11, 0, 0, logger, log_type=log_type)
         assert entry['event'] == 'Chassis Isolation Fault'
         assert entry['structured_data']['resistance_ohms'] == 59595
+
+
+# LogFile.has_classic_vin(): a narrow, file-level signal, independent of
+# LogFile.get_log_type()'s own fragile magic-string/filename detection,
+# that lets LogData._collect_and_process_entries() upgrade an Unknown
+# Type file to MBB for 0x10/0x11 dispatch when a real, FMVSS 565
+# checksum-valid VIN sits at the known classic offset (0x240 or 0x252).
+# Investigated and scoped in analysis/mbb_dispatch_fix.md's dated
+# follow-up section: 36 of the 68 Unknown Type files carrying 0x10/0x11
+# entries have this signal (448 of 1,086 entries), validated against
+# every real BMS file in the file set (0 of 2,797 ever show a valid
+# classic VIN there) and against the 20 files that are genuinely MBB by
+# entry-type census but have no VIN at any known offset (this signal
+# correctly does not reach them - see NO_VIN_UNKNOWN_TYPE below).
+#
+# Real samples, zlib-compressed and base64-encoded inline, the same
+# convention as tests/test_json_log_info.py. Each is the smallest prefix
+# that still reaches at least one real 0x10 entry (checked against the
+# whole file when the samples were cut).
+
+# 0_538SM4Z25DCA03015_MBB_2020-08-02.bin, first 0x800 bytes: printable
+# junk lands at both offset 0x000 and 0x00d (get_log_type() never falls
+# through to the filename), so log_type is Unknown Type, but a real,
+# checksum-valid VIN sits at 0x240 and the file's own entries are
+# overwhelmingly the classic MBB-only ids.
+CLASSIC_VIN_UNKNOWN_TYPE = (
+    'eNrtVc1rE0EUfxOrSRpJE0VEKHEsaHqouskm5qMoSZNUsKQtDeaggZiPyUdJdkOaIL17EKTgQezH'
+    'QYz+B4uHQg+KNCfF+i+I4EGPnjyU+HbzOakGz8UfzL75ze/N25l5b3YbjUYjmlqn1EWdgsNNHS6/'
+    '2+V3+qDVg9YN730jgOhamwsgTQGIEeDplx3yKWCG3Z9PyIuPF2DDq7loaB0A5NB+2NvRBh2QgiDa'
+    '9+fbeiJxOtn11WEzdfpyd34Hq9hfhT5KQ7ppiOPKYOpEe8wwMK81BHVRZEA3jw3HORK3dZyASReT'
+    '5XQ6KaZFMetLCg5B9A2cB1cbbr8gqLXRtQi36I1FXfec7nAoKIjoBbDR8P94ifhDWXkGy+oUHnws'
+    'BhyyIME8LMB0nMAkPII3eh2ZIYRkAR/WgOWZVdEZMMgvDGAxwyUc5eY/+N627+xGzZJOCpexPix2'
+    'gF1TJ92JKydV89g6D9MwDnMwge/uLOx4ZXg0XiN8WPOz2Gx4ILQcB+XyoZbaOI3VK5XSOl2q16ic'
+    'o7EKy1DR4/GqTgDKxPXn9/H2OvYjY3p9nzY5CvsRaEZu9WgzglNVusk7b/6rGkC6xatbfdWHdJtX'
+    't/uqfaR6A2kqwe2oTZscbe9oqkd7kRnvzPrqV6R5Xs0nuB0VeLXAR/67qtIirxb76p2RqXS6vd5X'
+    'iINZgM/Y2Jn25VEuapNCwUWBBkMLlFWrcvUazch1qXbTAUroUL1C4cjc3dt+GpWz9RKja5kCKzOa'
+    'KaSkPMvSXFUu00VZYrQsZxmtyXSlLklFKa9xUGzaGzohVtgaq/npsvyQVa8uSaAYXdrdJYpBu8VE'
+    'OSfCEXQHuQ/A/6WPWvqERf3onX1LQP0zKpMz4/AbRsdS3Q=='
+)
+
+# 538SD5Z27ECB03639_BMS0_2017-07-09.bin, first 0x400 bytes: a real BMS
+# file, also Unknown Type (same magic-string gap), no VIN at either
+# classic offset - the negative control every real BMS file in the file
+# set confirms (0/2,797).
+GENUINE_BMS_UNKNOWN_TYPE = (
+    'eNpzcXUKdbdScHb0UwhKTU7NLMvMS1cIrsxLLmbYFPb3FnNcpAtERXB5ZklyBki2JF8hOb80Jz83'
+    'CUTngTX4Oyvk5qek6oFYVgqmxqo6CmEIpqeVgq6RqZmBQa4jwyYR0d18cZEMSdMZGRgmATEQbOLg'
+    '2AMS26T2F0S7INzk5x+C6S75v3tRVflk5mUreBYruOSX5zFsUkSWds0rSS1KTVHwTMlJVQguSSxJ'
+    'ZdjEy3sIqOAc53nOr/83yTMfAXK6+Hr4FPTrflUwWVsBHcYMclUXX6b4JoO/N4HSYfk5JYnpqQqO'
+    'yUX5xcUKzvl5JYnJJflFVgrGpmbmRrlhChr+2YmVmkC3MVeJxUW28LXzKWmDjVs0DWpcCx/IowLV'
+    'QGlGIK0kCfKw4l8QjcetHBwgBYybVLApBKrJS0mqhKlV/auMqcY5I7EoHRx4EEWyyIqQAy+0AOR6'
+    'FUmQ69v4lJXArp8JdD3ThAvMENcr/VVB1YsRNWp/VSUJR6DSXzUC5ohIgFQwggJPOJ2RQR6USERE'
+    'UcR+gcSs/+5wRiRRYCrMT0tTAIZIfllqkYIpMOklpmSVFpcAwyGtKD9XwcJQFZR8LcxVQcZpuwOj'
+    'YOVWRoa5GxgZhP7+/w8MbbAY0Bs67sSkQzRV6OkQSRp7OjQCKjgPS4fGQM5C/iX8WmazfFYzRF7a'
+    'Ck04C/ndJIDp0NMdbzq0MDY0RUqH5n+9EZYHpRanlpSAXA50pYFCSmkqKBRSi4ryiwAF+0LH'
+)
+
+# 538XXCZ43JCC09678_MBB_2020-09-19.bin, first 0x400 bytes: genuinely
+# classic MBB content by entry-type census (thousands of MBB-only ids,
+# zero BMS-only ids, in the full file), but no VIN at any known offset,
+# classic or Gen3 - has_classic_vin() correctly does not reach it. This
+# is the honest limit of this fix's scope, not a bug; see the dated
+# follow-up section in analysis/mbb_dispatch_fix.md.
+NO_VIN_UNKNOWN_TYPE = (
+    'eNqLDyktysvMS1fwd3NTcHF2cdZTcMtJTC+2UjCoMDBg2CT3lwEIXFydQt2tFIJSi1NLrBQC8stT'
+    'i3T98xg2cZqAZBlZNnEaMIBZUAYj4yYXZI2++SmlOakKxckZqbmpCskZiXnpqSkKaUX5uQp++Xmp'
+    'Crn5KakKJfkKzhmJRekg14AEgJYbM2CAOf///2dgsPkPl2XELsuhARbYpAJWxcTQNZ0RzSRDi/Qk'
+    'A18nJ4Yrfl5nP4KFYPTspxYHRM7s2wWjFwKBV2megoKFgpGBkYGCgbmVkbGVoQnDqX27/kEwA4iG'
+    '6b+46jaYTmLYt+uWkTfD/5kMDCvPyDI86+ViYPZBOOH/eQYGZiC9Wt8MzNdi6GDQA+pREYPIh/mn'
+    'xcPUpqi/tf+96o39+n0MDCKSQC8B7Su3YGAQ90cyDw2gB16fMCQQVgujBgZCPSNYzxx1BoaHtsSb'
+    'Ow9q3goC5qIDQubikkc3lxGuAtUeRUlIklCH6gXxv6z0fIQwcQEQvP71Z3k50OGawKgI9jI2NjSP'
+    'cg0yMDQ0xOLi11iSgRGygkxTY4uICOcoE2MvZ2cDSzNzYBTFyzEs4WZY5RaBahZbLUN4O0OcG0Od'
+    'N0O5EMPEKIYp39gZGbUY775jYmP8nsLwijGd8QTjFAeBVVMEp29imr2K4dkWhk//9YNZGb7/BDr+'
+    'pgCfMcNyxU6GXwxmjPeAGnUZWxhFGbYx3GOIZAhi+AH000qGcwwvGeYlvIJYGXRAnRPMkGLsBFFc'
+    'ACedNbw='
+)
+
+
+def _load_real_file(sample, filename):
+    d = tempfile.mkdtemp(prefix='mbbdispatch')
+    path = os.path.join(d, filename)
+    with open(path, 'wb') as f:
+        f.write(zlib.decompress(base64.b64decode(sample)))
+    try:
+        lf = LogFile(path)
+        ld = LogData(lf)
+        return lf, ld
+    finally:
+        os.unlink(path)
+        os.rmdir(d)
+
+
+def test_has_classic_vin_true_routes_real_unknown_type_file_to_mbb_decoder():
+    lf, ld = _load_real_file(CLASSIC_VIN_UNKNOWN_TYPE, '0_538SM4Z25DCA03015_MBB_2020-08-02.bin')
+    assert lf.log_type == LogFile.log_type_unknown
+    assert lf.has_classic_vin is True
+    hits = [e for e in ld._processed_entries if e.message_type == '0x10']
+    assert hits
+    assert hits[0].event == 'BMS Throt En Wire Disable'
+    assert hits[0].structured_data == {'vpack_voltage_volts': 114.451, 'thr_en_voltage_volts': 0.003}
+
+
+def test_has_classic_vin_false_keeps_real_bms_unknown_type_file_on_bms_decoder():
+    lf, ld = _load_real_file(GENUINE_BMS_UNKNOWN_TYPE, '538SD5Z27ECB03639_BMS0_2017-07-09.bin')
+    assert lf.log_type == LogFile.log_type_unknown
+    assert lf.has_classic_vin is False
+    hits = [e for e in ld._processed_entries if e.message_type == '0x10']
+    assert hits
+    assert hits[0].event == 'Exiting Hibernate'
+    assert hits[0].structured_data is None
+
+
+def test_has_classic_vin_false_for_known_mbb_content_with_no_recoverable_vin():
+    # The honest scope limit, not a bug: this file's own entry-type
+    # census (analysis/mbb_dispatch_fix.md) is overwhelmingly classic
+    # MBB, but no VIN is recoverable at any known offset, so the narrow
+    # VIN-based signal correctly declines to route it - closing this
+    # gap needs the full entry-census approach the follow-up scoped as
+    # a separate, larger piece of work, not this fix.
+    lf, ld = _load_real_file(NO_VIN_UNKNOWN_TYPE, '538XXCZ43JCC09678_MBB_2020-09-19.bin')
+    assert lf.log_type == LogFile.log_type_unknown
+    assert lf.has_classic_vin is False
+
+
+def test_has_classic_vin_false_for_short_buffer():
+    # Guarded by size the same way get_version_and_header()'s own
+    # _legacy_vin_present() is: a buffer too short for the 0x252 offset
+    # must not raise, just report no VIN.
+    d = tempfile.mkdtemp(prefix='mbbdispatch')
+    path = os.path.join(d, 'tiny.bin')
+    try:
+        with open(path, 'wb') as f:
+            f.write(bytes(64))
+        tiny = LogFile(path)
+        assert tiny.has_classic_vin is False
+    finally:
+        os.unlink(path)
+        os.rmdir(d)
