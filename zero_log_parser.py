@@ -3735,13 +3735,6 @@ class LogData(object):
                                 sort_timestamp = 0
 
                         collected_entries.append((sort_timestamp, entry_payload, entry_num))
-                        # parse_entry resyncs `address` forward to the next 0xB2
-                        # and measures `length` from THERE, but returns only
-                        # `length` -- the resynced address is dropped on the
-                        # floor. Advancing `read_pos += length` therefore keeps
-                        # the walk permanently behind by the resync distance, so
-                        # it re-reads records it has already read and spends its
-                        # fixed `entries_count` budget doing it.
                         # `.find` searches the buffer in place, without copying it.
                         _sync = self.entries.find(b'\xb2', read_pos)
                         if _sync < 0:
@@ -3750,9 +3743,18 @@ class LogData(object):
                             read_pos = _sync + length
                         else:
                             # A delimiter with a zero length byte; step past it
-                            # so the walk cannot freeze here.
+                            # so the walk cannot freeze here. When no further
+                            # 0xb2 exists anywhere in the buffer (_next == -1,
+                            # a file's own trailing zero-length entry), advance
+                            # from _sync (this entry's own just-found position),
+                            # not the stale pre-call read_pos: falling back to
+                            # read_pos + 1 here made the walk creep forward one
+                            # byte per loop iteration while re-finding and
+                            # re-emitting this same entry every time, spending
+                            # the whole entries_count budget on duplicates of it
+                            # (analysis/marker_masking_and_duplicate_entries.md).
                             _next = self.entries.find(b'\xb2', _sync + 1)
-                            read_pos = _next if _next > read_pos else read_pos + 1
+                            read_pos = _next if _next > read_pos else _sync + 1
                     except Exception as e:
                         logger.warning(f'Error parsing entry {entry_num}: {e}')
                         break
