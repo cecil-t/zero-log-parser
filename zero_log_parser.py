@@ -1927,7 +1927,7 @@ class Gen2:
     @classmethod
     def fst_entry_prefix(cls, x):
         """The 6-byte prefix at the start of every FST/Gen3 MBB entry payload
-        that this parser decodes structurally (types 0x48, 0x4B-0x4D, 0x4F).
+        that this parser decodes structurally (types 0x48, 0x49, 0x4B-0x4D, 0x4F).
         Bytes 0-3 are a little-endian u32 in the range 0-1,000,000 that is
         almost always a multiple of 1000, and are read as the sub-second part
         of the entry's timestamp, in microseconds: sorted by the entry's own
@@ -2072,6 +2072,57 @@ class Gen2:
             'event': 'Queue Full',
             'conditions': (f"Queue {queue_name}: a={structured_data['value_a']}, "
                            f"b={structured_data['value_b']}"),
+            'structured_data': structured_data
+        }
+
+    # Entry type 0x49: charging telemetry, one fixed 31-byte payload (no size
+    # tiers). The shared 6-byte prefix (see fst_entry_prefix), then:
+    #   6-9    u32 LE, constant: 117600 in 2,457 of 2,552 entries, 117400 in
+    #          the other 95 (two 2019 VINs, all emitted after a 0x4C rather
+    #          than a 0x52)
+    #  10-11   u16 LE measurement; 0x01xx values (256+) occur, so not a byte
+    #  12-26   15 bytes, undecoded (byte 12 and the byte pair 13/15 move
+    #          slowly and together with charge progress; unresolved)
+    #  27-30   u32 LE, constant: 106000 in all 2,552 entries
+    # Confirmed at full-population scale (analysis/type_0x49.md): 2,558
+    # entries in 260 of 474 deduplicated FST/Gen3 MBB files, always 31 bytes;
+    # 2,552 pass the prefix gate and the 6 that do not all come from one
+    # escape-damaged file. Every one of the 2,552 immediately follows a
+    # CHRG-tagged 0x52 (2,457) or 0x4C (95) entry, and every CHRG-tagged 0x52
+    # entry is followed by one, so the record is a charging-state companion;
+    # that role is the basis of the event name and is an inference. The two
+    # constants read as millivolts for a 28-cell pack (28 x 4.2 V = 117.6 V);
+    # that scale is also unconfirmed, so all three values use neutral names.
+    CHARGE_TELEMETRY_LEN = 31
+
+    @classmethod
+    def charge_telemetry(cls, x):
+        """Type 0x49 - charging telemetry (31 bytes).
+
+        Decodes the shared prefix, the two constants and the one measurement
+        described above; bytes 12-26 are kept, undecoded, in raw_hex. Any
+        payload that is not exactly 31 bytes, or whose sub-second value is
+        above FST_SUBSECOND_MAX_US, falls back to the raw-hex report
+        unhandled_entry_format() already gives this type.
+        """
+        if len(x) != cls.CHARGE_TELEMETRY_LEN:
+            return cls.unhandled_entry_format(0x49, x)
+
+        prefix = cls.fst_entry_prefix(x)
+        if prefix['subsecond_us'] > cls.FST_SUBSECOND_MAX_US:
+            return cls.unhandled_entry_format(0x49, x)
+
+        structured_data = dict(prefix)
+        structured_data['constant_a'] = BinaryTools.unpack('uint32', x, 6)
+        structured_data['measurement_a'] = BinaryTools.unpack('uint16', x, 10)
+        structured_data['constant_b'] = BinaryTools.unpack('uint32', x, 27)
+        structured_data['raw_hex'] = bytes(x[12:27]).hex()
+
+        return {
+            'event': 'Charging Telemetry',
+            'conditions': (f"a={structured_data['constant_a']}, "
+                           f"b={structured_data['constant_b']}, "
+                           f"measurement={structured_data['measurement_a']}"),
             'structured_data': structured_data
         }
 
@@ -3140,6 +3191,7 @@ class Gen2:
             0x3c: cls.disarmed_status,
             0x3d: cls.contactor_closed_or_precharge_failed,
             0x48: cls.charger_info,             # Type 72
+            0x49: cls.charge_telemetry,         # Type 73
             0x4b: lambda m: cls.state_snapshot_dispatch(0x4b, m),  # Type 75
             0x4c: lambda m: cls.state_snapshot_dispatch(0x4c, m),  # Type 76
             0x4d: lambda m: cls.state_snapshot_dispatch(0x4d, m),  # Type 77
