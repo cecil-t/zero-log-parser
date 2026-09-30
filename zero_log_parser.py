@@ -2314,8 +2314,10 @@ class Gen2:
     # NUL-padded ASCII state tag, so the tag sits at payload offset 35 / 39 /
     # 43 for 0x51 / 0x52 / 0x53. Each tier also comes in a variant 4 bytes
     # longer (0x52: 81 and 85 bytes; 0x53: 95 and 99, plus a rare 93).
-    # Only the tag and framing are decoded; every other byte is preserved in
-    # raw_hex. Evidence: analysis/fst_part2_unknown_types.md.
+    # The tag, framing and the SOC / pack voltage / battery current triple
+    # (tag-9 / tag-8 / tag-4) are decoded; every other byte is preserved in
+    # raw_hex. Evidence: analysis/fst_part2_unknown_types.md,
+    # analysis/gen3_page_claims.md.
     # message_type -> (tier name, accepted payload lengths, state tag offset)
     TELEMETRY_TIERS = {
         0x52: ('medium', (81, 85), 39),
@@ -2328,9 +2330,14 @@ class Gen2:
     def vehicle_state_telemetry_tier(cls, message_type, x):
         """Types 0x52 / 0x53 - state-tagged telemetry, medium / large tier.
 
-        Decodes the tier, the state tag and the shared 6-byte prefix. The
-        fields between them and after the tag are unidentified (the layout
-        was mapped by shape only) and are kept in raw_hex. A payload whose
+        Decodes the tier, the state tag, the shared 6-byte prefix and the
+        same SOC / pack voltage / battery current triple 0x51 carries
+        (analysis/gen3_page_claims.md, Claim 1 and its 2026-09-30
+        addendum): u8 at tag-9, u32 LE mV at tag-8, i32 LE mA at tag-4,
+        addressed relative to the tag so every length variant of both
+        tiers reads the same way. Every other byte is unidentified and kept
+        in raw_hex. Voltage and current are exposed raw even when zero
+        (HIB). A payload whose
         length is not one of the accepted variants, or whose tag is not one
         of the known state names, falls back to the raw-hex report
         unhandled_entry_format() already gives these types.
@@ -2348,16 +2355,27 @@ class Gen2:
         if prefix['subsecond_us'] > cls.FST_SUBSECOND_MAX_US:
             return cls.unhandled_entry_format(message_type, x)
 
+        soc = BinaryTools.unpack('uint8', x, tag_offset - 9)
+        pack_voltage_mv = BinaryTools.unpack('uint32', x, tag_offset - 8)
+        current_ma = BinaryTools.unpack('int32', x, tag_offset - 4)
+
         structured_data = {
             'telemetry_tier': tier,
             'state': state,
         }
         structured_data.update(prefix)
+        structured_data['state_of_charge_percent'] = soc
+        structured_data['pack_voltage_volts'] = pack_voltage_mv / 1000.0
+        structured_data['battery_current_amps'] = current_ma / 1000.0
         structured_data['raw_hex'] = bytes(x).hex()
 
         return {
             'event': 'Vehicle State Telemetry',
-            'conditions': f'State: {state}, tier: {tier}',
+            'conditions': (
+                f'State: {state}, tier: {tier}, SOC:{soc}%, '
+                f'Vpack:{pack_voltage_mv / 1000.0:.3f}V, '
+                f'I:{current_ma / 1000.0:.3f}A'
+            ),
             'structured_data': structured_data
         }
 
