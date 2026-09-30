@@ -2307,6 +2307,121 @@ class Gen2:
             return result
         return cls.bms_cell_telemetry(message_type, x)
 
+    # Fields shared by the state-tagged telemetry family 0x51 / 0x52 / 0x53,
+    # all addressed relative to the start of the 4-byte state tag (analysis/
+    # gen3_page_claims.md, Phase 2 and the follow-up sections). The block in
+    # front of the tag is aligned from the tag, so it is at the same
+    # tag-relative offsets in every length variant:
+    #   tag-25  validity flag byte (see TELEMETRY_*_FLAG_MASK)
+    #   tag-21  u24 LE, mV, 0.1 V steps - DC bus voltage
+    #   tag-17  i32 LE, mA, 0.1 A steps - DC bus current
+    #   tag-13  u16 LE - motor RPM
+    #   tag+9   i16 LE, 0.01 C - ambient temperature
+    #   tag+13/17/21/25  u8, C - motor, controller, pack warmest, pack coldest
+    # The tail after the temperatures is present only in some variants; the
+    # offsets below are tag-relative and the four bytes of the tail that the
+    # short variants lack are the DC-DC voltage and its pad, so every later
+    # field sits 4 bytes earlier in them:
+    #   +29 u24 LE, uV - DC-DC (12 V auxiliary) bus voltage, long variants only
+    #   +35/+31 u24 LE - cumulative counter, never decreases, advances only
+    #       while RUN; fitted 5.15e-5 counter units per (speed_raw x second)
+    #       (per model 5.03e-5 to 5.40e-5), i.e. about 19,400 speed_raw-seconds
+    #       per unit. Its physical unit is NOT resolved.
+    #   +39/+35 u32 LE - always an exact multiple of 18750; value / 18750 is
+    #       speed_raw, proportional to motor_rpm with a per-model constant
+    #       (1.345 SR/SRS/SRF, 1.415 DSR/X, 1.286 DS). Unit NOT resolved: the
+    #       interval 0.0105-0.0113 mph per unit satisfies the constraints
+    #       tested (see the analysis file) but no round unit sits in it.
+    #   +43/+39 u16 LE - range_estimate_raw, evidence favours an estimated
+    #       remaining range in hundredths of a distance unit; not confirmed.
+    # message_type, payload length -> {field: tag-relative offset}
+    TELEMETRY_TAIL_FIELDS = {
+        (0x51, 68): {'aux': 29},
+        (0x52, 81): {'counter': 31, 'speed': 35, 'range': 39},
+        (0x52, 85): {'aux': 29, 'counter': 35, 'speed': 39, 'range': 43},
+        (0x53, 95): {'counter': 31, 'speed': 35, 'range': 39},
+        (0x53, 99): {'aux': 29, 'counter': 35, 'speed': 39, 'range': 43},
+    }
+    # Validity flag byte: two bit groups, set when the group's fields read as
+    # zero because the source is not reporting. Confirmed on all 82,840
+    # entries of the FST file set: the controller group (mask 0x1E) is set
+    # exactly when the DC bus voltage is zero (and then DC bus current, RPM,
+    # speed and the motor/controller temperatures are all zero too); the BMS
+    # group (mask 0xE0) is set only when the pack voltage and current are
+    # zero. A held, non-zero DC bus voltage while charging is NOT flagged.
+    TELEMETRY_CONTROLLER_FLAG_MASK = 0x1E
+    TELEMETRY_BMS_FLAG_MASK = 0xE0
+    TELEMETRY_SPEED_STEP = 18750
+
+    @classmethod
+    def telemetry_extended_fields(cls, message_type, x, tag_offset):
+        """Decode the DC bus, RPM, temperature, validity and tail fields that
+        types 0x51 / 0x52 / 0x53 share. Returns (structured_data updates,
+        conditions fragment). Fields the controller group flags as not
+        reporting are None rather than zero."""
+        flags = BinaryTools.unpack('uint8', x, tag_offset - 25)
+        controller_ok = not (flags & cls.TELEMETRY_CONTROLLER_FLAG_MASK)
+        bms_ok = not (flags & cls.TELEMETRY_BMS_FLAG_MASK)
+
+        def ctl(value):
+            return value if controller_ok else None
+
+        dc_bus_mv = int.from_bytes(bytes(x[tag_offset - 21:tag_offset - 18]), 'little')
+        dc_bus_ma = BinaryTools.unpack('int32', x, tag_offset - 17)
+        rpm = BinaryTools.unpack('uint16', x, tag_offset - 13)
+        ambient = BinaryTools.unpack('int16', x, tag_offset + 9) / 100.0
+        motor_t = BinaryTools.unpack('uint8', x, tag_offset + 13)
+        controller_t = BinaryTools.unpack('uint8', x, tag_offset + 17)
+        pack_warm_t = BinaryTools.unpack('uint8', x, tag_offset + 21)
+        pack_cold_t = BinaryTools.unpack('uint8', x, tag_offset + 25)
+
+        data = {
+            'motor_controller_data_valid': controller_ok,
+            'bms_data_valid': bms_ok,
+            'dc_bus_voltage_volts': ctl(dc_bus_mv / 1000.0),
+            'dc_bus_current_amps': ctl(dc_bus_ma / 1000.0),
+            'motor_rpm': ctl(rpm),
+            'ambient_temperature_c': ambient,
+            'motor_temperature_c': ctl(motor_t),
+            'controller_temperature_c': ctl(controller_t),
+            'pack_temperature_warmest_c': pack_warm_t,
+            'pack_temperature_coldest_c': pack_cold_t,
+        }
+
+        def fmt(value, spec=''):
+            return 'n/a' if value is None else format(value, spec)
+
+        conditions = (
+            f"Vdc:{fmt(data['dc_bus_voltage_volts'], '.1f')}V, "
+            f"Idc:{fmt(data['dc_bus_current_amps'], '.1f')}A, "
+            f"RPM:{fmt(data['motor_rpm'])}, Tamb:{ambient:.2f}C, "
+            f"Tmotor:{fmt(data['motor_temperature_c'])}C, "
+            f"Tctrl:{fmt(data['controller_temperature_c'])}C, "
+            f"Tpack:{pack_warm_t}/{pack_cold_t}C"
+        )
+
+        tail = cls.TELEMETRY_TAIL_FIELDS.get((message_type, len(x)), {})
+        if 'aux' in tail:
+            aux_uv = int.from_bytes(bytes(x[tag_offset + tail['aux']:tag_offset + tail['aux'] + 3]), 'little')
+            data['dc_dc_bus_voltage_volts'] = aux_uv / 1e6
+            conditions += f", Vdcdc:{aux_uv / 1e6:.2f}V"
+        if 'counter' in tail:
+            at = tag_offset + tail['counter']
+            counter = int.from_bytes(bytes(x[at:at + 3]), 'little')
+            data['distance_counter_raw'] = counter
+            conditions += f", Counter(raw):{counter}"
+        if 'speed' in tail:
+            value = BinaryTools.unpack('uint32', x, tag_offset + tail['speed'])
+            speed = value // cls.TELEMETRY_SPEED_STEP if value % cls.TELEMETRY_SPEED_STEP == 0 else None
+            data['speed_raw'] = ctl(speed)
+            conditions += f", Speed(raw):{fmt(data['speed_raw'])}"
+        if 'range' in tail:
+            estimate = BinaryTools.unpack('uint16', x, tag_offset + tail['range'])
+            data['range_estimate_raw'] = estimate
+            conditions += f", Range(raw):{estimate}"
+        conditions += f", Valid(ctrl/bms):{int(controller_ok)}/{int(bms_ok)}"
+        return data, conditions
+
     # Entry types 0x52 and 0x53: the medium and large tiers of the family
     # whose small tier is 0x51 (vehicle_state_telemetry). Same head layout as
     # 0x51 and as 0x4B-0x4D: the shared 6-byte prefix, then a block that
@@ -2367,6 +2482,8 @@ class Gen2:
         structured_data['state_of_charge_percent'] = soc
         structured_data['pack_voltage_volts'] = pack_voltage_mv / 1000.0
         structured_data['battery_current_amps'] = current_ma / 1000.0
+        extended, extended_conditions = cls.telemetry_extended_fields(message_type, x, tag_offset)
+        structured_data.update(extended)
         structured_data['raw_hex'] = bytes(x).hex()
 
         return {
@@ -2374,7 +2491,7 @@ class Gen2:
             'conditions': (
                 f'State: {state}, tier: {tier}, SOC:{soc}%, '
                 f'Vpack:{pack_voltage_mv / 1000.0:.3f}V, '
-                f'I:{current_ma / 1000.0:.3f}A'
+                f'I:{current_ma / 1000.0:.3f}A, {extended_conditions}'
             ),
             'structured_data': structured_data
         }
@@ -2934,6 +3051,8 @@ class Gen2:
         structured_data['state_of_charge_percent'] = soc
         structured_data['pack_voltage_volts'] = pack_voltage_mv / 1000.0
         structured_data['battery_current_amps'] = current_ma / 1000.0
+        extended, extended_conditions = cls.telemetry_extended_fields(0x51, x, 35)
+        structured_data.update(extended)
         structured_data['raw_hex'] = bytes(x).hex()
 
         conditions = (
@@ -2941,7 +3060,8 @@ class Gen2:
             f"SOC:{soc}%, Vpack:{pack_voltage_mv / 1000.0:.3f}V, "
             f"I:{current_ma / 1000.0:.3f}A, "
             f"Temp1: {temp1}°C, Temp2: {temp2}°C, "
-            f"Temp3: {temp3}°C, Temp4: {temp4}°C"
+            f"Temp3: {temp3}°C, Temp4: {temp4}°C, "
+            f"{extended_conditions}"
         )
 
         # Determine event name based on state - riding states show as "Riding" for plotting compatibility
