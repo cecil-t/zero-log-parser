@@ -2856,9 +2856,17 @@ class Gen2:
         and byte 10 is a 7-value enum that correlates with vehicle_state
         and varies within a single VIN's own files, ruling it out as a
         per-vehicle hardware ID as well as a temperature reading).
-        Confirmed: this entry type does not carry odometer or SOC data.
-        Removed rather than repointed; kept in raw_hex like every other
-        unidentified byte in this payload.
+        Confirmed: this entry type does not carry odometer or SOC data
+        at bytes 0-7. Removed rather than repointed; kept in raw_hex like
+        every other unidentified byte in this payload.
+
+        Later finding (analysis/gen3_page_claims.md, Claim 1): a real SOC,
+        pack voltage and battery current do sit elsewhere, at payload 26
+        (u8), 27 (u32 LE, mV) and 31 (i32 LE, mA), immediately before the
+        state tag at 35. Confirmed at corpus scale: voltage 79.9-117.6 V,
+        SOC/voltage correlation 0.98 per VIN, charging current negative.
+        In HIB the voltage and current fields are almost always zero
+        (98.3% / 98.4%), so they are exposed raw, not as a measurement.
 
         Kept, corrected: temperature_1..4_celsius are real (see
         vst_field_fix.md's per-VIN smoothness, physical-range and seasonal
@@ -2890,6 +2898,10 @@ class Gen2:
         if prefix['subsecond_us'] > cls.FST_SUBSECOND_MAX_US:
             return cls.unhandled_entry_format(0x51, x)
 
+        soc = BinaryTools.unpack('uint8', x, 26)
+        pack_voltage_mv = BinaryTools.unpack('uint32', x, 27)
+        current_ma = BinaryTools.unpack('int32', x, 31)
+
         temp1 = BinaryTools.unpack('uint8', x, 48)
         temp2 = BinaryTools.unpack('uint8', x, 52)
         temp3 = BinaryTools.unpack('uint8', x, 56)
@@ -2901,10 +2913,15 @@ class Gen2:
         structured_data['temperature_2_celsius'] = temp2
         structured_data['temperature_3_celsius'] = temp3
         structured_data['temperature_4_celsius'] = temp4
+        structured_data['state_of_charge_percent'] = soc
+        structured_data['pack_voltage_volts'] = pack_voltage_mv / 1000.0
+        structured_data['battery_current_amps'] = current_ma / 1000.0
         structured_data['raw_hex'] = bytes(x).hex()
 
         conditions = (
             f"State: {state}, "
+            f"SOC:{soc}%, Vpack:{pack_voltage_mv / 1000.0:.3f}V, "
+            f"I:{current_ma / 1000.0:.3f}A, "
             f"Temp1: {temp1}°C, Temp2: {temp2}°C, "
             f"Temp3: {temp3}°C, Temp4: {temp4}°C"
         )

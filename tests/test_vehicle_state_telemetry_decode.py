@@ -142,3 +142,31 @@ def test_parse_entry_dispatches_end_to_end():
     assert entry['event'] == 'Vehicle State (PWSU)'
     assert entry['message_type'] == '0x51'
     assert entry['structured_data']['vehicle_state'] == 'PWSU'
+
+
+def test_decodes_soc_pack_voltage_and_current():
+    payload = _payload(64, _tag('RUN'))
+    payload[26] = 64
+    struct.pack_into('<I', payload, 27, 105144)
+    struct.pack_into('<i', payload, 31, 12273)
+    sd = Gen2.vehicle_state_telemetry(payload)['structured_data']
+    assert sd['state_of_charge_percent'] == 64
+    assert sd['pack_voltage_volts'] == 105.144
+    assert sd['battery_current_amps'] == 12.273
+
+
+def test_current_is_signed_and_68_byte_variant_decodes():
+    payload = _payload(68, _tag('CHRG'))
+    struct.pack_into('<I', payload, 27, 99000)
+    struct.pack_into('<i', payload, 31, -13000)
+    sd = Gen2.vehicle_state_telemetry(payload)['structured_data']
+    assert sd['pack_voltage_volts'] == 99.0
+    assert sd['battery_current_amps'] == -13.0
+
+
+def test_hibernate_zero_fields_are_exposed_raw():
+    payload = _payload(64, _tag('HIB'))
+    struct.pack_into('<I', payload, 27, 0)
+    struct.pack_into('<i', payload, 31, 0)
+    sd = Gen2.vehicle_state_telemetry(payload)['structured_data']
+    assert sd['pack_voltage_volts'] == 0.0 and sd['battery_current_amps'] == 0.0
