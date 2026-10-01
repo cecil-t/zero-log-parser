@@ -19,7 +19,9 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from zero_log_parser import LogFile, LogData
+from datetime import datetime, timezone
+
+from zero_log_parser import LogFile, LogData, Gen2
 
 
 def _write_minimal_rev0_file(path, entries_bytes):
@@ -189,3 +191,68 @@ def test_sort_timestamp_is_utc_epoch_whatever_the_host_timezone():
     c = _entries(data, tz='Asia/Kolkata')
     assert a == b == c
     assert {e['entry_number']: e['sort_timestamp'] for e in a}[3] == T1
+
+
+# --- rolling future limit: UTC date at parse time plus 5 years, end of that day ---
+
+FIXED_NOW = datetime(2026, 10, 1, 12, 0, 0, tzinfo=timezone.utc)
+LIMIT_2026 = 1_948_665_599        # 2031-10-01 23:59:59 UTC
+
+
+def _with_now(now, fn):
+    old = Gen2.utc_now
+    Gen2.utc_now = staticmethod(lambda: now)
+    try:
+        return fn()
+    finally:
+        Gen2.utc_now = old
+
+
+def test_clock_max_is_end_of_utc_day_five_years_on():
+    assert Gen2.clock_max(FIXED_NOW) == LIMIT_2026
+    assert Gen2.clock_max(datetime(2026, 10, 1, 0, 0, 0, tzinfo=timezone.utc)) == LIMIT_2026
+    assert Gen2.clock_max(datetime(2026, 10, 1, 23, 59, 59, tzinfo=timezone.utc)) == LIMIT_2026
+    # the next UTC day moves the window by a day
+    assert Gen2.clock_max(datetime(2026, 10, 2, 0, 0, 0, tzinfo=timezone.utc)) == LIMIT_2026 + 86400
+    # a non-UTC "now" is measured by its UTC date
+    from datetime import timedelta
+    ny = timezone(timedelta(hours=-5))
+    assert Gen2.clock_max(datetime(2026, 9, 30, 22, 0, 0, tzinfo=ny)) == LIMIT_2026
+    # 29 February falls back to 28 February
+    assert Gen2.clock_max(datetime(2028, 2, 29, 5, 0, 0, tzinfo=timezone.utc)) == \
+        int(datetime(2033, 2, 28, 23, 59, 59, tzinfo=timezone.utc).timestamp())
+
+
+def test_default_now_is_the_real_clock():
+    lim = Gen2.clock_max()
+    assert lim > int(datetime.now(timezone.utc).timestamp()) + 4 * 365 * 86400
+    assert lim < int(datetime.now(timezone.utc).timestamp()) + 6 * 365 * 86400
+
+
+def _sources(raws, now):
+    data = _log(*[(r, OPEN) for r in raws])
+    es = _with_now(now, lambda: _by_number(_entries(data)))
+    return [es[i + 1]['time_source'] for i in range(len(raws))]
+
+
+def test_boundary_just_inside_and_just_outside_the_window():
+    inside, outside = LIMIT_2026, LIMIT_2026 + 1
+    assert _sources([inside], FIXED_NOW) == ['clock']
+    assert _sources([outside], FIXED_NOW) == ['invalid']
+    es = _with_now(FIXED_NOW, lambda: _by_number(_entries(_log((inside, OPEN)))))
+    assert es[1]['sort_timestamp'] == inside
+    es = _with_now(FIXED_NOW, lambda: _by_number(_entries(_log((outside, OPEN)))))
+    assert es[1]['sort_timestamp'] is None
+
+
+def test_between_2031_and_the_limit_is_now_a_date_and_moves_with_the_calendar():
+    jan_2031 = 1_924_992_000     # 2031-01-01, rejected by the old fixed 2030-12-31 cut-off
+    assert _sources([jan_2031], FIXED_NOW) == ['clock']
+    # four years earlier the same value is beyond the window
+    early = datetime(2022, 10, 1, tzinfo=timezone.utc)
+    assert _sources([jan_2031], early) == ['invalid']
+
+
+def test_lower_bound_is_unchanged():
+    # one below the bound is uptime (backfilled here because a date follows in the same cycle)
+    assert _sources([1_262_304_000 - 1, 1_262_304_000], FIXED_NOW) == ['backfilled', 'clock']
