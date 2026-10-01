@@ -2590,6 +2590,26 @@ class Gen2:
         # payload 25: a temperature (0.87 correlation with the MBB pack temperatures).
         data['bms_temperature_c'] = byte_at(25 + shift)
 
+        # payload 26-29: a four-byte status word, little endian, exposed raw.
+        # Not a temperature, count, cell index or limit (every byte takes a
+        # handful of bitmask-like values, e.g. 0xd8/0xdc, 0xf3/0xc3/0x03,
+        # 0x07/0x04, 0x0e/0x08, none monotonic or smooth in time). It tracks
+        # the BMS state: against the report mode (payload 38) the four bytes
+        # together carry 1.1 to 1.3 bits of its 2.0 to 2.2 bits of entropy,
+        # against the paired MBB state 0.4 to 0.7 bits per byte, and the
+        # bits move in pairs (bits 7:6 and 5:4 of the second byte and bits
+        # 1:0 of the third are 00 or 11 together, high in RUN and low in WAIT
+        # and PWSU). Two firmware families write it, stable per file (no file
+        # has both): one writes 0xd8/0xdc, ... (a rich bit pattern); the
+        # other writes the constant 0x33 and then the load and bus flags
+        # decoded below (the long variants and about a fifth of the short
+        # ones). The meaning of individual bits is not resolved, so no label
+        # is attached. All bytes 0xF0/0xFF is a placeholder record: None.
+        # Evidence: analysis/coverage_rebaseline_damaged.md, Part 2C.
+        status_word_bytes = bytes(x[26 + shift:30 + shift])
+        data['bms_status_word'] = None if all(b in sentinels for b in status_word_bytes) else \
+            int.from_bytes(status_word_bytes, 'little')
+
         if key in cls.BMS_STATUS_LONG_VARIANTS:
             # 0xFF is a real value here (under load), so only 0xF0 reads as no
             # data; a 0xFF from a placeholder record cannot be told apart, but
@@ -2718,9 +2738,12 @@ class Gen2:
     #   tag-21  u24 LE, mV, 0.1 V steps - DC bus voltage
     #   tag-17  i32 LE, mA, 0.1 A steps - DC bus current
     #   tag-13  u16 LE - motor RPM
-    #   tag+9   i16 LE, 0.01 C - ambient temperature
-    #   tag+13/17/21/25  u8, C - drive temperature 1, drive temperature 2,
-    #       pack warmest, pack coldest. The two drive temperatures are named
+    #   tag+9   i32 LE (range of an i16), 0.01 C - ambient temperature
+    #   tag+13/17/21/25  i32 LE (range of an i8), C - drive temperature 1,
+    #       drive temperature 2, pack warmest, pack coldest (signed 32-bit
+    #       words, see telemetry_extended_fields; until 2026-10-01 these
+    #       were read as unsigned bytes, so a negative temperature showed
+    #       as 256 minus its magnitude). The two drive temperatures are named
     #       by position, not by what they measure: tag+13 correlates more
     #       with load than tag+17 in 11 of 11 models and is hotter in 82% of
     #       entries overall, which suggests motor and controller, but it is
@@ -2882,12 +2905,12 @@ class Gen2:
             (20, 21, 'field', 'state_of_charge_percent'),
             (21, 25, 'field', 'battery_current_amps'),
             (25, 26, 'field', 'bms_temperature_c'),
-            (26, 30, 'unknown', 'not understood yet'),
+            (26, 30, 'field', 'bms_status_word'),
             (30, 31, 'field', 'pack_fault_flags_b'),
-            (31, 38, 'unknown', 'not understood yet'),
+            (31, 38, 'reserved', 'constant 0x00 in all 55652 of 79797 entries that no page marker (whole, or its first 2-3 bytes at the end of the payload) or 0xff erase fill touches; every other value is such damage'),
             (38, 39, 'field', 'bms_report_mode'),
             (39, 42, 'field', 'pack_voltage_volts'),
-            (42, 43, 'unknown', 'not understood yet'),
+            (42, 43, 'reserved', 'constant 0x00 in all 55652 of 79797 entries that no page marker (whole, or its first 2-3 bytes at the end of the payload) or 0xff erase fill touches; every other value is such damage'),
         ),
         (0x4b, 45): (
             (0, 4, 'field', 'subsecond_us'),
@@ -2903,9 +2926,7 @@ class Gen2:
             (20, 21, 'field', 'state_of_charge_percent'),
             (21, 25, 'field', 'battery_current_amps'),
             (25, 26, 'field', 'bms_temperature_c'),
-            (26, 28, 'unknown', 'not understood yet'),
-            (28, 29, 'field', 'bms_load_flag'),
-            (29, 30, 'field', 'bms_bus_engaged'),
+            (26, 30, 'field', 'bms_status_word (bytes 28 and 29 also bms_load_flag and bms_bus_engaged)'),
             (30, 31, 'field', 'pack_fault_flags_b'),
             (31, 38, 'reserved', 'constant 0x00 in all 38405 marker-free accepted entries'),
             (38, 39, 'field', 'bms_report_mode'),
@@ -2946,7 +2967,8 @@ class Gen2:
             (24, 25, 'field', 'state_of_charge_percent'),
             (25, 29, 'field', 'battery_current_amps'),
             (29, 30, 'field', 'bms_temperature_c'),
-            (30, 35, 'unknown', 'not understood yet'),
+            (30, 34, 'field', 'bms_status_word'),
+            (34, 35, 'unknown', 'not understood yet'),
             (35, 42, 'reserved', 'constant 0x00 in all 2638 marker-free accepted entries'),
             (42, 43, 'field', 'bms_report_mode'),
             (43, 46, 'field', 'pack_voltage_volts'),
@@ -2955,7 +2977,9 @@ class Gen2:
             (48, 49, 'field', 'cell_temperature_hottest_c'),
             (49, 52, 'unknown', 'not understood yet'),
             (52, 54, 'field', 'bms_charge_current_limit_amps'),
-            (54, 61, 'unknown', 'not understood yet'),
+            (54, 57, 'unknown', 'not understood yet'),
+            (57, 58, 'reserved', 'constant 0x00 in all 2448 of 4866 entries that no page marker (whole, or its first 2-3 bytes at the end of the payload) or 0xff erase fill touches; every other value is such damage'),
+            (58, 61, 'unknown', 'not understood yet'),
         ),
         (0x4c, 63): (
             (0, 4, 'field', 'subsecond_us'),
@@ -2970,10 +2994,7 @@ class Gen2:
             (24, 25, 'field', 'state_of_charge_percent'),
             (25, 29, 'field', 'battery_current_amps'),
             (29, 30, 'field', 'bms_temperature_c'),
-            (30, 31, 'reserved', 'constant 0x33 in all 2638 marker-free accepted entries'),
-            (31, 32, 'unknown', 'not understood yet'),
-            (32, 33, 'field', 'bms_load_flag'),
-            (33, 34, 'field', 'bms_bus_engaged'),
+            (30, 34, 'field', 'bms_status_word (bytes 32 and 33 also bms_load_flag and bms_bus_engaged)'),
             (34, 42, 'reserved', 'constant 0x00 in all 2638 marker-free accepted entries'),
             (42, 43, 'field', 'bms_report_mode'),
             (43, 46, 'field', 'pack_voltage_volts'),
@@ -2985,7 +3006,8 @@ class Gen2:
             (54, 56, 'field', 'bms_charge_current_limit_amps'),
             (56, 59, 'unknown', 'not understood yet'),
             (59, 60, 'reserved', 'constant 0x00 in all 2638 marker-free accepted entries'),
-            (60, 63, 'unknown', 'not understood yet'),
+            (60, 62, 'unknown', 'not understood yet'),
+            (62, 63, 'reserved', 'constant 0x00 in all 2476 of 5081 entries that no page marker (whole, or its first 2-3 bytes at the end of the payload) or 0xff erase fill touches; every other value is such damage'),
         ),
         (0x4c, 77): (
             (0, 4, 'field', 'subsecond_us'),
@@ -3036,7 +3058,8 @@ class Gen2:
             (28, 29, 'field', 'state_of_charge_percent'),
             (29, 33, 'field', 'battery_current_amps'),
             (33, 34, 'field', 'bms_temperature_c'),
-            (34, 39, 'unknown', 'not understood yet'),
+            (34, 38, 'field', 'bms_status_word'),
+            (38, 39, 'unknown', 'not understood yet'),
             (39, 46, 'reserved', 'constant 0x00 in all 9334 marker-free accepted entries'),
             (46, 47, 'field', 'bms_report_mode'),
             (47, 50, 'field', 'pack_voltage_volts'),
@@ -3067,9 +3090,7 @@ class Gen2:
             (28, 29, 'field', 'state_of_charge_percent'),
             (29, 33, 'field', 'battery_current_amps'),
             (33, 34, 'field', 'bms_temperature_c'),
-            (34, 36, 'unknown', 'not understood yet'),
-            (36, 37, 'field', 'bms_load_flag'),
-            (37, 38, 'field', 'bms_bus_engaged'),
+            (34, 38, 'field', 'bms_status_word (bytes 36 and 37 also bms_load_flag and bms_bus_engaged)'),
             (38, 39, 'unknown', 'not understood yet'),
             (39, 46, 'reserved', 'constant 0x00 in all 6421 marker-free accepted entries'),
             (46, 47, 'field', 'bms_report_mode'),
@@ -3084,7 +3105,7 @@ class Gen2:
             (63, 64, 'reserved', 'constant 0x00 in all 6421 marker-free accepted entries'),
             (64, 67, 'unknown', 'not understood yet'),
             (67, 70, 'field', 'full_charge_capacity_twin_ah'),
-            (70, 71, 'unknown', 'not understood yet'),
+            (70, 71, 'reserved', 'constant 0x00 in all 5958 of 14205 entries that no page marker (whole, or its first 2-3 bytes at the end of the payload) or 0xff erase fill touches; every other value is such damage'),
         ),
         (0x4d, 89): (
             (0, 4, 'field', 'subsecond_us'),

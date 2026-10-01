@@ -141,3 +141,20 @@ def test_conditions_gain_a_status_fragment_and_cell_voltage_fields_are_unchanged
     assert 'Mode:7' in out['conditions'] and out['conditions'].startswith('SOC:')
     assert 'voltage_low_cell_volts' in out['structured_data']
     assert 'raw_hex' in out['structured_data']
+
+
+def test_status_word_is_the_four_bytes_at_payload_26_on_every_variant_and_placeholders_are_none():
+    for message_type, length in VARIANTS:
+        sd = _decode(message_type, _payload(message_type, length, p26=0xd8, p27=0xf3, p28=0x07, p29=0x0e))['structured_data']
+        assert sd['bms_status_word'] == 0x0e07f3d8
+        sd = _decode(message_type, _payload(message_type, length, p26=0x33, p27=0x00, p28=0xff, p29=0x01))['structured_data']
+        assert sd['bms_status_word'] == 0x01ff0033
+        sd = _decode(message_type, _payload(message_type, length, p26=0xf0, p27=0xf0, p28=0xff, p29=0xf0))['structured_data']
+        assert sd['bms_status_word'] is None
+        # 0xf0 alone is a real value of the second byte (report mode 5), not a placeholder
+        sd = _decode(message_type, _payload(message_type, length, p26=0x33, p27=0xf0, p28=0x78, p29=0x00))['structured_data']
+        assert sd['bms_status_word'] == 0x0078f033
+
+
+def test_0x4b_at_43_bytes_has_no_unknown_byte_left():
+    assert all(kind != 'unknown' for _, _, kind, _ in Gen2.payload_layout(0x4b, 43))
