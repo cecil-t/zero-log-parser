@@ -164,8 +164,8 @@ def test_zero_length_entry_does_not_crash_and_is_still_counted():
 def test_entries_stay_in_byte_order_for_interpolation():
     # collected_entries must be built in byte order (not "every recovered
     # gap first, then every real entry"), since
-    # Gen2.interpolate_missing_timestamps fills a missing timestamp from
-    # list-adjacent neighbors, not from entry_num.
+    # Gen2.assign_legacy_times splits power cycles and orders entries from
+    # list position, not from entry_num.
     entry0 = _entry(0x01, 1_700_000_000, _fill(5))
     recoverable = MARK + b'recovered text here\x00'
     entry1 = _entry(0x01, 1_700_000_100, _fill(5, start=50))

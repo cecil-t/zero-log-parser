@@ -101,7 +101,10 @@ class ProcessedLogEntry:
     structured_data: Optional[dict] = None
     has_structured_data: bool = False
     message_type: str = "unknown"
-    original_timestamp: Optional[str] = None  # Raw timestamp before interpolation
+    original_timestamp: Optional[str] = None  # Raw timestamp (the uint32 as read), as text
+    raw_timestamp: Optional[int] = None       # The raw uint32 itself
+    uptime_s: Optional[int] = None            # Seconds since power-on, when the raw value is one
+    time_source: Optional[str] = None         # "clock", "backfilled", "uptime" (None: no raw time)
     # Gen3 text restored from the shipped template table (see Gen2.gen3_text_message)
     text_restored: bool = False
     restored_spans: Optional[list] = None      # [{offset, length, text}], offsets into the restored message
@@ -815,107 +818,127 @@ class Gen2:
         else:
             return str(timestamp)
 
+    # Raw Gen2 timestamps below this are seconds since power-on, not wall clock.
+    # (2010-01-01 UTC; Zero's earliest bikes are later than that.)
+    CLOCK_MIN = 1262304000
+    # Wall-clock values past 2030-12-31 are corrupt, not dates; kept apart from
+    # real times, same cut-off the old code used for sort_timestamp.
+    CLOCK_MAX = 1924991999
+
+    @staticmethod
+    def format_uptime(seconds):
+        """Seconds since power-on, shown as +H:MM:SS."""
+        return '+%d:%02d:%02d' % (seconds // 3600, (seconds % 3600) // 60, seconds % 60)
+
     @classmethod
-    def interpolate_missing_timestamps(cls, entries_with_metadata, logger=None):
+    def assign_legacy_times(cls, collected, timezone_offset=None):
         """
-        Improve missing timestamp detection by interpolating from neighboring entries.
+        Give every legacy (Gen2 parse_entry) entry its time, from the raw uint32.
 
-        Args:
-            entries_with_metadata: List of tuples (sort_timestamp, entry_payload, entry_num)
-            logger: Optional logger for debugging
+        A raw value below CLOCK_MIN is seconds since the bike was switched on
+        (it restarts at every key-on); anything else is wall-clock epoch. The
+        real date arrives part-way through each power cycle (on the entry
+        after "Module 00 Registered"), so the entries before it carry only
+        uptime. Entries are taken in log order, split into power cycles
+        (uptime drops, or wall clock is followed by uptime), and in a cycle
+        that later reaches wall-clock time T the earlier uptime entries get
+        T - (last uptime before T - own uptime), marked "backfilled". A cycle
+        that never gets a date keeps its uptime and gets no time of day.
 
-        Returns:
-            List of tuples with improved timestamps
+        collected: list of (sort_timestamp, payload, entry_num) in log order.
+        Returns the same shape, with sort_timestamp a true UTC epoch (0 for
+        uptime-only and timeless entries), payload['time'] the display string,
+        and payload['time_source'/'raw_timestamp'/'uptime_s'/'_order'] set.
         """
-        if not entries_with_metadata:
-            return entries_with_metadata
+        offset = timezone_offset or 0
+        n = len(collected)
+        kind = [None] * n          # 'clock', 'uptime', 'invalid' or None (entry has no raw timestamp)
+        for i, (_, payload, _num) in enumerate(collected):
+            raw = payload.get('original_timestamp')
+            if raw is None:
+                continue
+            if raw < cls.CLOCK_MIN:
+                kind[i] = 'uptime'
+            elif raw <= cls.CLOCK_MAX:
+                kind[i] = 'clock'
+            else:
+                kind[i] = 'invalid'
 
-        improved_entries = []
+        # Power cycles, in log order
+        cycle = [0] * n
+        cid = 0
+        prev_kind = None
+        prev_uptime = None
+        for i in range(n):
+            k = kind[i]
+            if k is None:
+                cycle[i] = cid
+                continue
+            if k == 'uptime':
+                raw = collected[i][1]['original_timestamp']
+                if prev_kind == 'clock' or (prev_kind == 'uptime' and raw < prev_uptime):
+                    cid += 1
+                prev_uptime = raw
+            cycle[i] = cid
+            prev_kind = k
 
-        # First pass: identify entries with valid and invalid timestamps
-        for i, (sort_timestamp, entry_payload, entry_num) in enumerate(entries_with_metadata):
-            time_str = entry_payload.get('time', '0')
-            has_valid_timestamp = not time_str.isdigit() and sort_timestamp > 0
+        # Backfill: first wall-clock entry of each cycle anchors the cycle's earlier uptime entries
+        epoch = [None] * n
+        source = [None] * n
+        first_clock = {}
+        for i in range(n):
+            if kind[i] == 'clock':
+                epoch[i] = collected[i][1]['original_timestamp']
+                source[i] = 'clock'
+                first_clock.setdefault(cycle[i], i)
+        last_uptime_before = {}
+        for c, f in first_clock.items():
+            for j in range(f - 1, -1, -1):
+                if cycle[j] != c:
+                    break
+                if kind[j] == 'uptime':
+                    last_uptime_before[c] = collected[j][1]['original_timestamp']
+                    break
+        for i in range(n):
+            if kind[i] == 'uptime' and cycle[i] in first_clock and i < first_clock[cycle[i]]:
+                c = cycle[i]
+                t_anchor = epoch[first_clock[c]]
+                epoch[i] = t_anchor - (last_uptime_before[c] - collected[i][1]['original_timestamp'])
+                source[i] = 'backfilled'
+            elif kind[i] == 'uptime':
+                source[i] = 'uptime'
 
-            improved_entries.append({
-                'index': i,
-                'sort_timestamp': sort_timestamp,
-                'entry_payload': entry_payload,
-                'entry_num': entry_num,
-                'has_valid_timestamp': has_valid_timestamp,
-                'original_time_str': time_str
-            })
-
-        # Second pass: interpolate missing timestamps
-        for i, entry in enumerate(improved_entries):
-            if not entry['has_valid_timestamp']:
-                # Find nearest valid timestamps before and after
-                before_entry = None
-                after_entry = None
-
-                # Look backwards for valid timestamp
-                for j in range(i - 1, -1, -1):
-                    if improved_entries[j]['has_valid_timestamp']:
-                        before_entry = improved_entries[j]
-                        break
-
-                # Look forwards for valid timestamp
-                for j in range(i + 1, len(improved_entries)):
-                    if improved_entries[j]['has_valid_timestamp']:
-                        after_entry = improved_entries[j]
-                        break
-
-                # Interpolate timestamp if we have neighbors
-                interpolated_timestamp = None
-                interpolated_time_str = None
-
-                if before_entry and after_entry:
-                    # Interpolate between two valid timestamps
-                    before_ts = before_entry['sort_timestamp']
-                    after_ts = after_entry['sort_timestamp']
-                    before_entry_num = before_entry['entry_num']
-                    after_entry_num = after_entry['entry_num']
-                    current_entry_num = entry['entry_num']
-
-                    # Calculate position ratio based on entry numbers
-                    if after_entry_num != before_entry_num:
-                        ratio = (current_entry_num - before_entry_num) / (after_entry_num - before_entry_num)
-                        interpolated_timestamp = before_ts + ratio * (after_ts - before_ts)
-                    else:
-                        interpolated_timestamp = before_ts
-
-                elif before_entry:
-                    # Extrapolate from previous entry (assume 1 second interval)
-                    entry_gap = entry['entry_num'] - before_entry['entry_num']
-                    interpolated_timestamp = before_entry['sort_timestamp'] + entry_gap
-
-                elif after_entry:
-                    # Extrapolate from next entry (assume 1 second interval)
-                    entry_gap = after_entry['entry_num'] - entry['entry_num']
-                    interpolated_timestamp = after_entry['sort_timestamp'] - entry_gap
-
-                # Apply interpolated timestamp if we calculated one
-                if interpolated_timestamp and interpolated_timestamp > 0:
-                    try:
-                        from datetime import datetime
-                        interpolated_dt = datetime.fromtimestamp(interpolated_timestamp)
-                        interpolated_time_str = interpolated_dt.strftime(ZERO_TIME_FORMAT)
-
-                        # Update the entry
-                        entry['sort_timestamp'] = interpolated_timestamp
-                        entry['entry_payload']['time'] = interpolated_time_str
-                        entry['has_valid_timestamp'] = True
-
-                        if logger:
-                            logger.debug('Interpolated timestamp for entry %d: %s (was: %s)',
-                                       entry['entry_num'] + 1, interpolated_time_str, entry['original_time_str'])
-                    except:
-                        # If interpolation fails, keep original
-                        pass
-
-        # Return in the original format
-        return [(entry['sort_timestamp'], entry['entry_payload'], entry['entry_num'])
-                for entry in improved_entries]
+        # Order key: real times by time; others sit just after the nearest earlier dated entry
+        out = []
+        anchor = float('-inf')
+        for i, (_, payload, entry_num) in enumerate(collected):
+            raw = payload.get('original_timestamp')
+            if epoch[i] is not None:
+                payload['time'] = strftime(ZERO_TIME_FORMAT, gmtime(epoch[i] + offset))
+                payload['time_source'] = source[i]
+                sort_ts = float(epoch[i])
+                anchor = sort_ts
+                dated = True
+            elif kind[i] == 'uptime':
+                payload['time'] = cls.format_uptime(raw)
+                payload['time_source'] = 'uptime'
+                sort_ts = 0
+                dated = False
+            elif kind[i] == 'invalid':
+                payload['time'] = strftime(ZERO_TIME_FORMAT, gmtime(raw + offset))
+                payload['time_source'] = 'invalid'
+                sort_ts = 0
+                dated = False
+            else:
+                # no raw timestamp (a recovered or corrupted entry): leave its own text
+                payload['time_source'] = None
+                sort_ts = 0
+                dated = False
+            payload['raw_timestamp'] = raw
+            payload['uptime_s'] = raw if kind[i] == 'uptime' else None
+            payload['_order'] = (anchor, dated, i)
+            out.append((sort_ts, payload, entry_num))
+        return out
 
     @classmethod
     def bms_discharge_level(cls, x):
@@ -5797,23 +5820,10 @@ class LogData(object):
                                                                               log_type=dispatch_log_type,
                                                                               gen3_text=(self.log_version == REV3))
 
-                        # Extract timestamp for sorting
-                        time_str = entry_payload.get('time', '0')
-                        if time_str.isdigit():
-                            sort_timestamp = int(time_str)
-                        else:
-                            try:
-                                try:
-                                    parsed_time = datetime.strptime(time_str, ZERO_TIME_FORMAT)
-                                except ValueError:
-                                    parsed_time = datetime.strptime(time_str, '%m/%d/%Y %H:%M:%S')
-                                if parsed_time.year > 2030:
-                                    sort_timestamp = 0
-                                else:
-                                    sort_timestamp = parsed_time.timestamp()
-                            except:
-                                sort_timestamp = 0
-
+                        # Times are assigned for the whole log afterwards
+                        # (Gen2.assign_legacy_times): a single entry's raw value
+                        # is not enough to know its time of day.
+                        sort_timestamp = 0
                         collected_entries.append((sort_timestamp, entry_payload, entry_num))
                         # `.find` searches the buffer in place, without copying it.
                         _sync = self.entries.find(b'\xb2', read_pos)
@@ -5864,17 +5874,17 @@ class LogData(object):
                     and not Gen2.is_paged_bms_format(self.entries):
                 Gen3TelemetryFirmware.redecode(collected_entries, self.header_info.get('Firmware rev.'))
 
-            # Apply timestamp interpolation before sorting
-            collected_entries = Gen2.interpolate_missing_timestamps(collected_entries, logger)
+            # Assign times per power cycle (replaces the old linear interpolation
+            # by entry number, which ran across power cycles)
+            collected_entries = Gen2.assign_legacy_times(collected_entries, self.timezone_offset)
 
             # FST/Gen3 only: drop entries whose bytes repeat an earlier entry
             # (Gen2.find_duplicate_entries). log_version REV3 also covers
             # legacy-platform ring-buffer files, so the file must also start
             # with the FST/Gen3 system information entry (Gen2.is_fst_platform_file).
-            # Legacy files are left as read. Runs after interpolation, which
-            # places a missing timestamp by entry number between its
-            # neighbours, so the entries that remain keep the values they had
-            # with the copies present.
+            # Legacy files are left as read. Runs after the time assignment,
+            # so the entries that remain keep the times they had with the
+            # copies present.
             if self.log_version == REV3 and Gen2.is_fst_platform_file(self.log_file.raw()) \
                     and len(entry_spans) == len(collected_entries):
                 collected_entries = Gen2.drop_duplicate_entries(self.entries, collected_entries, entry_spans)
@@ -5884,8 +5894,13 @@ class LogData(object):
                 collected_entries = self._filter_collected_entries(collected_entries, start_time, end_time)
                 logger.info(f"Filtered to {len(collected_entries)} entries based on time range")
 
-            # Sort by timestamp (newest first)
-            collected_entries.sort(key=lambda x: x[0], reverse=True)
+            # Newest first. Real times sort by time, ties in log order as before.
+            # Entries with no time of day sit just after the nearest earlier dated
+            # entry (or first, if none), in reverse log order so the newest is first.
+            def _order(x):
+                anchor, dated, idx = x[1]['_order']
+                return (-anchor, 1, idx) if dated else (-anchor, 0, -idx)
+            collected_entries.sort(key=_order)
 
             # Process sorted entries into ProcessedLogEntry objects
             for line_num, (sort_timestamp, entry_payload, original_entry_num) in enumerate(collected_entries):
@@ -5921,7 +5936,10 @@ class LogData(object):
                     restoration_reading=entry_payload.get('restoration_reading'),
                     template_id=entry_payload.get('template_id'),
                     event_as_read=entry_payload.get('event_as_read'),
-                    event_has_newline=bool(entry_payload.get('event_has_newline'))
+                    event_has_newline=bool(entry_payload.get('event_has_newline')),
+                    raw_timestamp=entry_payload.get('raw_timestamp'),
+                    uptime_s=entry_payload.get('uptime_s'),
+                    time_source=entry_payload.get('time_source')
                 )
                 processed_entries.append(processed_entry)
 
@@ -5959,7 +5977,9 @@ class LogData(object):
                         structured_data=structured_data,
                         has_structured_data=has_json_data,
                         message_type=message_type,
-                        original_timestamp=str(int(entry.time.timestamp()))  # Use timestamp as original for Gen3
+                        original_timestamp=str(int(entry.time.timestamp())),  # Use timestamp as original for Gen3
+                        raw_timestamp=int(entry.time.timestamp()),
+                        time_source='clock'
                     )
                     processed_entries.append(processed_entry)
                 except Exception as e:
@@ -6738,7 +6758,8 @@ class LogData(object):
         for entry in processed_entries:
             json_entry = {
                 'entry_number': entry.entry_number,
-                'timestamp': entry.timestamp,
+                # Power-on-only entries have no time of day: null here, see uptime_s
+                'timestamp': None if entry.time_source == 'uptime' else entry.timestamp,
                 'sort_timestamp': entry.sort_timestamp,
                 'log_level': entry.log_level,
                 'event': entry.event,
@@ -6760,6 +6781,12 @@ class LogData(object):
                 json_entry['restoration_reading'] = entry.restoration_reading
                 json_entry['template_id'] = entry.template_id
                 json_entry['event_as_read'] = entry.event_as_read
+
+            # Additive time provenance fields (see JSON_STRUCTURE.md)
+            json_entry['raw_timestamp'] = entry.raw_timestamp
+            if entry.uptime_s is not None:
+                json_entry['uptime_s'] = entry.uptime_s
+            json_entry['time_source'] = entry.time_source
 
             json_output['entries'].append(json_entry)
 
@@ -6806,6 +6833,10 @@ class LogData(object):
 
             # Use centralized processing
             processed_entries = self._collect_and_process_entries(logger, start_time, end_time)
+
+            if processed_entries and all(e.time_source in ('uptime', 'invalid') for e in processed_entries):
+                write_line('This log has no dates or times of day. Times are shown as time since the bike was switched on.')
+                write_line()
 
             write_line('Printing {0} of {0} log entries..'.format(len(processed_entries)))
             write_line()
