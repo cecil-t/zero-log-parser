@@ -92,8 +92,12 @@ def test_classic_text_entries_without_a_prefix_are_not_touched():
 def test_event_text_is_left_exactly_as_before():
     payload = _gen3('Precharge: 95%')
     out = Gen2.debug_message(payload)
-    assert out['event'] == BinaryTools.unpack_str(payload, 0x0, count=len(payload) - 1)
-    assert 'conditions' not in out
+    # parse_entry() would have run improve_message_parsing() on the plain
+    # event; the structured path applies the same call, so the text matches.
+    from zero_log_parser import improve_message_parsing
+    plain = BinaryTools.unpack_str(payload, 0x0, count=len(payload) - 1)
+    expected = improve_message_parsing(plain, '')[:2]
+    assert (out['event'], out['conditions']) == expected
     assert out['structured_data']['precharge_percent'] == 95
     out = Gen2.debug_message(_gen3('Kill Sw = STOP'))
     assert 'structured_data' not in out

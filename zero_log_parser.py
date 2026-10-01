@@ -1676,8 +1676,14 @@ class Gen2:
         # exactly as they were.
         gen3_structured = cls.gen3_text_event(x)
         if gen3_structured is not None:
+            # parse_entry() skips improve_message_parsing() for any entry that
+            # already carries structured_data, so apply it here, exactly as
+            # parse_entry() would have (same arguments), to keep event and
+            # conditions identical to what these entries rendered before.
+            improved_event, improved_conditions = improve_message_parsing(message, '')[:2]
             return {
-                'event': message,
+                'event': improved_event,
+                'conditions': improved_conditions,
                 'log_level': log_level,
                 'structured_data': gen3_structured
             }
