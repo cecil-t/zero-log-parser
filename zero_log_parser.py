@@ -788,9 +788,12 @@ class Gen2:
     # Raw Gen2 timestamps below this are seconds since power-on, not wall clock.
     # (2010-01-01 UTC; Zero's earliest bikes are later than that.)
     CLOCK_MIN = 1262304000
-    # Wall-clock values later than this many years past today (UTC date at parse
+    # Wall-clock values later than this many months past today (UTC date at parse
     # time) are corrupt, not dates; kept apart from real times.
-    CLOCK_FUTURE_YEARS = 1
+    CLOCK_FUTURE_MONTHS = 30
+    # Anchor rule for backfill (see assign_legacy_times), in seconds
+    ANCHOR_TOLERANCE = 60       # a first clock value this far out of line with its neighbours is an outlier
+    ANCHOR_NEIGHBOUR_WINDOW = 600   # the fallback anchor must sit this close to its neighbours
 
     @staticmethod
     def utc_now():
@@ -800,13 +803,14 @@ class Gen2:
     @classmethod
     def clock_max(cls, now=None):
         """Latest raw wall-clock epoch still accepted as a date: the end of the UTC
-        day that is CLOCK_FUTURE_YEARS after the UTC date of `now` (default: now)."""
+        day that is CLOCK_FUTURE_MONTHS after the UTC date of `now` (default: now).
+        A day that does not exist in the target month (31 August plus 6 months)
+        becomes the last day of that month."""
         d = (now or cls.utc_now()).astimezone(timezone.utc).date()
-        try:
-            limit = d.replace(year=d.year + cls.CLOCK_FUTURE_YEARS)
-        except ValueError:       # 29 February
-            limit = d.replace(year=d.year + cls.CLOCK_FUTURE_YEARS, day=28)
-        return calendar.timegm((limit.year, limit.month, limit.day, 23, 59, 59))
+        month_index = d.year * 12 + (d.month - 1) + cls.CLOCK_FUTURE_MONTHS
+        year, month = month_index // 12, month_index % 12 + 1
+        day = min(d.day, calendar.monthrange(year, month)[1])
+        return calendar.timegm((year, month, day, 23, 59, 59))
 
     @staticmethod
     def format_uptime(seconds):
@@ -867,31 +871,70 @@ class Gen2:
             cycle[i] = cid
             prev_kind = k
 
-        # Backfill: first wall-clock entry of each cycle anchors the cycle's earlier uptime entries
+        # Backfill. A is the first clock entry of a cycle that has uptime entries before
+        # it, N the next clock entry of that cycle, P the last dated entry before the
+        # cycle in log order (invalid and undated entries ignored). A is rejected as the
+        # anchor if
+        #   - N exists and A is later than N by more than ANCHOR_TOLERANCE (a future
+        #     outlier), or
+        #   - P and N exist, A is earlier than P by more than ANCHOR_TOLERANCE, and N is
+        #     not earlier than P by more than that (a past outlier whose neighbours
+        #     agree; the N versus P test keeps ring buffer wrap points from triggering it).
+        # Otherwise A anchors, whatever the forward gap (a long gap is usually parked
+        # time inside what the splitter treats as one cycle). A rejected A hands the
+        # anchor to N with the same arithmetic, but only if N lies within
+        # ANCHOR_NEIGHBOUR_WINDOW of P and of the clock entry after N (where they
+        # exist); otherwise the cycle's boot entries stay uptime. A itself stays a
+        # clock entry either way.
         epoch = [None] * n
         source = [None] * n
-        first_clock = {}
+        groups = {}
+        order = []
         for i in range(n):
+            if cycle[i] not in groups:
+                groups[cycle[i]] = []
+                order.append(cycle[i])
+            groups[cycle[i]].append(i)
             if kind[i] == 'clock':
                 epoch[i] = collected[i][1]['original_timestamp']
                 source[i] = 'clock'
-                first_clock.setdefault(cycle[i], i)
-        last_uptime_before = {}
-        for c, f in first_clock.items():
-            for j in range(f - 1, -1, -1):
-                if cycle[j] != c:
-                    break
-                if kind[j] == 'uptime':
-                    last_uptime_before[c] = collected[j][1]['original_timestamp']
-                    break
-        for i in range(n):
-            if kind[i] == 'uptime' and cycle[i] in first_clock and i < first_clock[cycle[i]]:
-                c = cycle[i]
-                t_anchor = epoch[first_clock[c]]
-                epoch[i] = t_anchor - (last_uptime_before[c] - collected[i][1]['original_timestamp'])
-                source[i] = 'backfilled'
-            elif kind[i] == 'uptime':
+        raw_of = lambda i: collected[i][1]['original_timestamp']
+        last_dated = None
+        for c in order:
+            idx = groups[c]
+            clocks = [i for i in idx if kind[i] == 'clock']
+            uptimes = [i for i in idx if kind[i] == 'uptime']
+            for i in uptimes:
                 source[i] = 'uptime'
+            if clocks:
+                first = clocks[0]
+                before = [i for i in uptimes if i < first]
+                if before:
+                    a_raw = raw_of(first)
+                    n_raw = raw_of(clocks[1]) if len(clocks) > 1 else None
+                    p = last_dated
+                    tol = cls.ANCHOR_TOLERANCE
+                    rejected = False
+                    if n_raw is not None and a_raw - n_raw > tol:
+                        rejected = True
+                    elif p is not None and n_raw is not None and a_raw < p - tol and not (n_raw < p - tol):
+                        rejected = True
+                    anchor = first
+                    if rejected:
+                        near = cls.ANCHOR_NEIGHBOUR_WINDOW
+                        m_raw = raw_of(clocks[2]) if len(clocks) > 2 else None
+                        if (p is None or abs(n_raw - p) <= near) and (m_raw is None or abs(n_raw - m_raw) <= near):
+                            anchor = clocks[1]
+                        else:
+                            anchor = None
+                    last_uptime = raw_of(before[-1])
+                    if anchor is not None:
+                        for i in before:
+                            epoch[i] = raw_of(anchor) - (last_uptime - raw_of(i))
+                            source[i] = 'backfilled'
+            for i in idx:
+                if epoch[i] is not None:
+                    last_dated = epoch[i]
 
         # Order key: real times by time; others sit just after the nearest earlier dated entry
         out = []
