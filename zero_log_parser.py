@@ -41,6 +41,7 @@ import string
 import struct
 from collections import OrderedDict, namedtuple
 from dataclasses import dataclass
+import calendar
 from datetime import datetime, timedelta, timezone
 from math import trunc
 from time import gmtime, localtime, strftime
@@ -821,9 +822,25 @@ class Gen2:
     # Raw Gen2 timestamps below this are seconds since power-on, not wall clock.
     # (2010-01-01 UTC; Zero's earliest bikes are later than that.)
     CLOCK_MIN = 1262304000
-    # Wall-clock values past 2030-12-31 are corrupt, not dates; kept apart from
-    # real times, same cut-off the old code used for sort_timestamp.
-    CLOCK_MAX = 1924991999
+    # Wall-clock values later than this many years past today (UTC date at parse
+    # time) are corrupt, not dates; kept apart from real times.
+    CLOCK_FUTURE_YEARS = 5
+
+    @staticmethod
+    def utc_now():
+        """Current time, UTC. A seam for tests: replace Gen2.utc_now to fix 'now'."""
+        return datetime.now(timezone.utc)
+
+    @classmethod
+    def clock_max(cls, now=None):
+        """Latest raw wall-clock epoch still accepted as a date: the end of the UTC
+        day that is CLOCK_FUTURE_YEARS after the UTC date of `now` (default: now)."""
+        d = (now or cls.utc_now()).astimezone(timezone.utc).date()
+        try:
+            limit = d.replace(year=d.year + cls.CLOCK_FUTURE_YEARS)
+        except ValueError:       # 29 February
+            limit = d.replace(year=d.year + cls.CLOCK_FUTURE_YEARS, day=28)
+        return calendar.timegm((limit.year, limit.month, limit.day, 23, 59, 59))
 
     @staticmethod
     def format_uptime(seconds):
@@ -831,7 +848,7 @@ class Gen2:
         return '+%d:%02d:%02d' % (seconds // 3600, (seconds % 3600) // 60, seconds % 60)
 
     @classmethod
-    def assign_legacy_times(cls, collected, timezone_offset=None):
+    def assign_legacy_times(cls, collected, timezone_offset=None, now=None):
         """
         Give every legacy (Gen2 parse_entry) entry its time, from the raw uint32.
 
@@ -846,11 +863,13 @@ class Gen2:
         that never gets a date keeps its uptime and gets no time of day.
 
         collected: list of (sort_timestamp, payload, entry_num) in log order.
+        now: the moment the future limit is measured from (default: the current time).
         Returns the same shape, with sort_timestamp a true UTC epoch (0 for
         uptime-only and timeless entries), payload['time'] the display string,
         and payload['time_source'/'raw_timestamp'/'uptime_s'/'_order'] set.
         """
         offset = timezone_offset or 0
+        clock_max = cls.clock_max(now)
         n = len(collected)
         kind = [None] * n          # 'clock', 'uptime', 'invalid' or None (entry has no raw timestamp)
         for i, (_, payload, _num) in enumerate(collected):
@@ -859,7 +878,7 @@ class Gen2:
                 continue
             if raw < cls.CLOCK_MIN:
                 kind[i] = 'uptime'
-            elif raw <= cls.CLOCK_MAX:
+            elif raw <= clock_max:
                 kind[i] = 'clock'
             else:
                 kind[i] = 'invalid'
@@ -4972,7 +4991,7 @@ class Gen2:
                 parsed_time = datetime.strptime(time_str, ZERO_TIME_FORMAT)
             except ValueError:
                 parsed_time = datetime.strptime(time_str, '%m/%d/%Y %H:%M:%S')
-            return 0 if parsed_time.year > 2030 else parsed_time.timestamp()
+            return 0 if calendar.timegm(parsed_time.timetuple()) > cls.clock_max() else parsed_time.timestamp()
         except Exception:
             return 0
 
@@ -5998,8 +6017,8 @@ class LogData(object):
             time_str = entry_payload.get('time', '0')
             entry_time = self._parse_entry_timestamp(time_str)
 
-            # Skip obviously invalid timestamps (year > 2030 or epoch)
-            if entry_time.year > 2030 or entry_time.year == 1970:
+            # Skip obviously invalid timestamps (too far in the future, or epoch)
+            if calendar.timegm(entry_time.timetuple()) > Gen2.clock_max() or entry_time.year == 1970:
                 filtered_entries.append((sort_timestamp, entry_payload, entry_num))
                 continue
 
