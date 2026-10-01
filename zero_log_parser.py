@@ -1581,7 +1581,7 @@ class Gen2:
             return cls.debug_message(x)
         structured = cls._gen3_text_structured(rendered['parse_text'])
         entry = cls._debug_text_entry(rendered['display'], structured)
-        if not any(c.isalnum() for c in re.sub(r'\{[^}]*\}', '', rendered['display'])):
+        if rendered['bytes_lost'] and not any(c.isalnum() for c in re.sub(r'\{[^}]*\}', '', rendered['display'])):
             # Nothing of the message survived: the convention for a destroyed
             # entry, event shown as the span tag, flags set on structured_data.
             sd = dict(entry.get('structured_data') or {})

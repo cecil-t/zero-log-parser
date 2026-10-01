@@ -188,3 +188,8 @@ def test_legacy_path_keeps_the_structured_data_it_had_for_prefixed_payloads():
     # the prefix: debug_message() gives them the same structured_data as before.
     out = Gen2.debug_message(_gen3('Precharge: 95%'))
     assert out['structured_data']['precharge_percent'] == 95
+
+
+def test_a_genuinely_empty_message_is_not_marked_corrupted():
+    entry = _parse(_gen3(b''), gen3_text=True)
+    assert not (entry.get('structured_data') or {}).get('bytes_corrupted')
