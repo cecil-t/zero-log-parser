@@ -1490,7 +1490,8 @@ class Gen2:
         ASCII (damaged tails) are shown as an undecoded-hex tag, never
         guessed at.
 
-        Returns a dict, or None when the payload cannot be a Gen3 text entry:
+        Returns a dict, or None when the payload cannot be a Gen3 text entry
+        (too short, or plain text with no prefix):
           display       text for the event, markers and odd bytes tagged
           parse_text    the message with each marker simply removed (the form
                         gen3_text_event() has always matched against), or None
@@ -1508,6 +1509,13 @@ class Gen2:
         lost = 0
         lead = ''
         gate_failed = BinaryTools.unpack('uint32', x, 0) > cls.FST_SUBSECOND_MAX_US
+        if gate_failed and all(0x20 <= b <= 0x7e for b in bytes(x[:4])):
+            # log_version REV3 also covers legacy-platform ring-buffer files
+            # whose text entries are plain strings with no FST prefix (for
+            # example 538SDJ.../538SM... MBB files). Four printable bytes can
+            # never be a sub-second value (at least 0x20202020), so this is
+            # not a damaged prefix: leave it to the legacy decoder.
+            return None
         at = bytes(x[:9]).find(marker)
         if at < 0:
             if gate_failed:
@@ -1642,7 +1650,22 @@ class Gen2:
     def debug_message(cls, x):
         # Extract the debug message string
         message = BinaryTools.unpack_str(x, 0x0, count=len(x) - 1)
-        return cls._debug_text_entry(message)
+        return cls._debug_text_entry(message, cls._legacy_gen3_structured(x))
+
+    @classmethod
+    def _legacy_gen3_structured(cls, x):
+        """Exactly what debug_message() already did for any payload that
+        carries a plausible FST sub-second value in its first four bytes: add
+        structured numbers parsed from payload[6:]. Kept byte-for-byte so that
+        entries outside the FST path (for example files whose log_version is
+        unknown) render as they did; plain-text legacy entries never pass the
+        gate and are unaffected."""
+        if len(x) <= 6 or BinaryTools.unpack('uint32', x, 0) > cls.FST_SUBSECOND_MAX_US:
+            return None
+        raw = bytes(x[6:]).replace(cls.GEN3_TEXT_ARTIFACT, b'').split(b'\x00')[0]
+        if not raw or not all(0x20 <= b <= 0x7e for b in raw):
+            return None
+        return cls._gen3_text_structured(raw.decode('ascii'))
 
     @classmethod
     def _debug_text_entry(cls, message, gen3_structured=None):

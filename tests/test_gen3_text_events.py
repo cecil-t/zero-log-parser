@@ -123,8 +123,8 @@ def test_legacy_path_is_unchanged_by_the_gen3_flag_being_off():
     # as before: the string read from payload byte 0.
     payload = _gen3('Precharge: 95%')
     legacy = _parse(payload, gen3_text=False)
-    assert legacy['event'] == Gen2.debug_message(payload)['event']
-    assert 'structured_data' not in legacy
+    assert legacy['event'] == Gen2.debug_message(payload)['event']      # junk, as before
+    assert legacy['event'] != 'Precharge: 95%'
     classic = _parse(bytearray(b'Precharge: 95%\x00'), gen3_text=False)
     assert classic['event'] == 'Precharge: 95%' and 'structured_data' not in classic
     # and a classic entry is not affected by the debug_message() refactor
@@ -169,3 +169,18 @@ def test_prefix_damage_without_a_marker_is_undecodable_and_not_guessed():
     entry = _parse(damaged, gen3_text=True)
     assert entry['event'] == 'Fault cleared: HVIL_OPEN'
     assert entry['structured_data']['fault_code'] == 'HVIL_OPEN'
+
+
+def test_plain_text_entries_in_a_rev3_file_are_left_to_the_legacy_decoder():
+    # log_version REV3 also covers legacy-platform ring-buffer files whose text
+    # has no FST prefix: it must render exactly as it did, not as undecoded hex.
+    entry = _parse(bytearray(b'DEBUG: Reset: Power-On\x00'), gen3_text=True)
+    assert entry['event'] == 'Reset: Power-On' and entry['log_level'] == 'DEBUG'
+    assert Gen2.gen3_text_message(bytearray(b'INFO:  Enabling charger\x00')) is None
+
+
+def test_legacy_path_keeps_the_structured_data_it_had_for_prefixed_payloads():
+    # Files outside the FST path (unknown log_version) that nonetheless carry
+    # the prefix: debug_message() gives them the same structured_data as before.
+    out = Gen2.debug_message(_gen3('Precharge: 95%'))
+    assert out['structured_data']['precharge_percent'] == 95
