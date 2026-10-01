@@ -193,10 +193,10 @@ def test_sort_timestamp_is_utc_epoch_whatever_the_host_timezone():
     assert {e['entry_number']: e['sort_timestamp'] for e in a}[3] == T1
 
 
-# --- rolling future limit: UTC date at parse time plus 5 years, end of that day ---
+# --- rolling future limit: UTC date at parse time plus 1 year, end of that day ---
 
 FIXED_NOW = datetime(2026, 10, 1, 12, 0, 0, tzinfo=timezone.utc)
-LIMIT_2026 = 1_948_665_599        # 2031-10-01 23:59:59 UTC
+LIMIT_2026 = 1_822_435_199        # 2027-10-01 23:59:59 UTC
 
 
 def _with_now(now, fn):
@@ -208,7 +208,7 @@ def _with_now(now, fn):
         Gen2.utc_now = old
 
 
-def test_clock_max_is_end_of_utc_day_five_years_on():
+def test_clock_max_is_end_of_utc_day_one_year_on():
     assert Gen2.clock_max(FIXED_NOW) == LIMIT_2026
     assert Gen2.clock_max(datetime(2026, 10, 1, 0, 0, 0, tzinfo=timezone.utc)) == LIMIT_2026
     assert Gen2.clock_max(datetime(2026, 10, 1, 23, 59, 59, tzinfo=timezone.utc)) == LIMIT_2026
@@ -220,13 +220,13 @@ def test_clock_max_is_end_of_utc_day_five_years_on():
     assert Gen2.clock_max(datetime(2026, 9, 30, 22, 0, 0, tzinfo=ny)) == LIMIT_2026
     # 29 February falls back to 28 February
     assert Gen2.clock_max(datetime(2028, 2, 29, 5, 0, 0, tzinfo=timezone.utc)) == \
-        int(datetime(2033, 2, 28, 23, 59, 59, tzinfo=timezone.utc).timestamp())
+        int(datetime(2029, 2, 28, 23, 59, 59, tzinfo=timezone.utc).timestamp())
 
 
 def test_default_now_is_the_real_clock():
     lim = Gen2.clock_max()
-    assert lim > int(datetime.now(timezone.utc).timestamp()) + 4 * 365 * 86400
-    assert lim < int(datetime.now(timezone.utc).timestamp()) + 6 * 365 * 86400
+    assert lim > int(datetime.now(timezone.utc).timestamp()) + 364 * 86400
+    assert lim < int(datetime.now(timezone.utc).timestamp()) + 367 * 86400 + 86400
 
 
 def _sources(raws, now):
@@ -245,12 +245,19 @@ def test_boundary_just_inside_and_just_outside_the_window():
     assert es[1]['sort_timestamp'] is None
 
 
-def test_between_2031_and_the_limit_is_now_a_date_and_moves_with_the_calendar():
-    jan_2031 = 1_924_992_000     # 2031-01-01, rejected by the old fixed 2030-12-31 cut-off
-    assert _sources([jan_2031], FIXED_NOW) == ['clock']
-    # four years earlier the same value is beyond the window
-    early = datetime(2022, 10, 1, tzinfo=timezone.utc)
-    assert _sources([jan_2031], early) == ['invalid']
+def test_far_future_is_invalid_and_the_window_moves_with_the_calendar():
+    jun_2029 = 1_874_966_400     # 2029-06-01: nearly three years past FIXED_NOW
+    assert _sources([jun_2029], FIXED_NOW) == ['invalid']
+    # the same value is an ordinary date when parsed in mid-2028 (within a year)
+    later = datetime(2028, 6, 15, tzinfo=timezone.utc)
+    assert _sources([jun_2029], later) == ['clock']
+
+
+def test_a_future_value_does_not_backfill_its_neighbours():
+    # an out-of-window value must not anchor the cycle: the uptime entries before it stay undated
+    es = _with_now(FIXED_NOW, lambda: _by_number(_entries(_log((0, OPEN), (5, CLOSE), (1_874_966_400, REG)))))
+    assert es[1]['time_source'] == 'uptime' and es[2]['time_source'] == 'uptime'
+    assert es[3]['time_source'] == 'invalid'
 
 
 def test_lower_bound_is_unchanged():

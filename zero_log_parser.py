@@ -790,7 +790,7 @@ class Gen2:
     CLOCK_MIN = 1262304000
     # Wall-clock values later than this many years past today (UTC date at parse
     # time) are corrupt, not dates; kept apart from real times.
-    CLOCK_FUTURE_YEARS = 5
+    CLOCK_FUTURE_YEARS = 1
 
     @staticmethod
     def utc_now():
