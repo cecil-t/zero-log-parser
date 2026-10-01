@@ -93,13 +93,30 @@ Each log entry follows this structure:
 | Field | Description |
 |-------|-------------|
 | `entry_number` | Original entry number from the log file |
-| `timestamp` | Human-readable timestamp in configured timezone |
-| `sort_timestamp` | Unix timestamp used for chronological sorting |
+| `timestamp` | Human-readable timestamp in configured timezone. `null` when the entry has only a time since power-on (`time_source` is `"uptime"`) |
+| `sort_timestamp` | True UTC Unix epoch (not dependent on the host timezone); `null` when the entry has no time of day |
+| `raw_timestamp` | The 32-bit value as read from the entry (legacy MBB/BMS entries; Gen3 entries repeat the epoch). `null` for corrupted or recovered entries that carry none |
+| `uptime_s` | Seconds since the bike was switched on, when the raw value is one (`time_source` `"uptime"` or `"backfilled"`). Omitted otherwise |
+| `time_source` | Where the time came from, see below. `null` when the entry has no raw timestamp |
 | `log_level` | Severity level: DATA, INFO, WARN, ERROR |
 | `event` | Descriptive name of the logged event |
 | `conditions` | Additional context or description (optional) |
 | `is_structured_data` | Boolean indicating if structured_data field is present |
 | `structured_data` | Object containing parsed sensor data (when available) |
+
+### Time sources (legacy MBB and BMS entries)
+
+A legacy entry's raw 32-bit timestamp is seconds since power-on when it is below 2010-01-01 UTC (1262304000), and a wall-clock epoch otherwise. The seconds-since-power-on counter restarts at every key-on, and the real date arrives part-way through each power cycle. Entries are split into power cycles in log order (a new cycle starts when the uptime value drops, or when wall-clock entries are followed by uptime entries).
+
+| `time_source` | Meaning |
+|---|---|
+| `clock` | Raw value is a wall-clock epoch. `timestamp`/`sort_timestamp` are that time |
+| `backfilled` | Raw value is uptime, and the same power cycle later reaches a wall-clock time T. The time is T minus (the last uptime before T minus this entry's uptime), accurate to about a second |
+| `uptime` | Raw value is uptime and the cycle never gets a date. No time of day is invented: `timestamp` and `sort_timestamp` are `null`, `uptime_s` holds the value, and the text output shows `+H:MM:SS` |
+| `invalid` | Raw value is a wall-clock epoch after 2030-12-31, which is corrupt rather than a date. `timestamp` shows the value as decoded, `sort_timestamp` is `null` |
+| `null` | The entry has no raw timestamp (corrupted or recovered entry) |
+
+Newest entries come first. Entries with a real time sort by time. Entries without a time of day keep their log position: they sit just after the nearest earlier dated entry, in reverse log order; a log with no dates at all comes out in reverse log order. Text output of such a log starts with the note "This log has no dates or times of day. Times are shown as time since the bike was switched on."
 
 ## Output Format Differences
 
