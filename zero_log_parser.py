@@ -58,6 +58,12 @@ ZERO_TIME_FORMAT = '%Y-%m-%d %H:%M:%S'  # ISO format is more universal
 MBB_TIMESTAMP_GMT_OFFSET = -7 * 60 * 60
 
 
+class UnreadableLogError(ValueError):
+    """Raised when a file cannot be a decodable Zero log at all: too short to
+    hold the header its format needs, or holding no log entries to walk.
+    The message names the reason and is meant to be shown to the user as is."""
+
+
 class MismatchingVinError(Exception):
     """Raised when attempting to merge LogData objects with different VINs"""
     def __init__(self, vin1, vin2):
@@ -582,6 +588,36 @@ class LogFile:
 
     def raw(self):
         return bytearray(self._data)
+
+    def require_length(self, end, what):
+        """Raise UnreadableLogError if the file ends before byte offset `end`.
+        The classic header readers use fixed offsets; on a truncated file they
+        used to run off the buffer and surface as a bare struct.error."""
+        if len(self._data) < end:
+            raise UnreadableLogError(
+                'Cannot decode %s: the file is only %d bytes, but reading %s needs at '
+                'least %d bytes (truncated or not a classic Zero log)'
+                % (os.path.basename(self.file_path), len(self._data), what, end))
+
+    def describe_no_entries(self):
+        """Reason, for a message, why a file holds no log entries."""
+        d = self._data
+        name = os.path.basename(self.file_path)
+        if len(d) == 0:
+            return 'Cannot decode %s: the file is empty' % name
+        if d.count(0xff) == len(d):
+            return ('Cannot decode %s: the file is an erased flash image (all %d bytes are 0xFF), '
+                    'there is no log data in it' % (name, len(d)))
+        if d.count(0x00) == len(d):
+            return 'Cannot decode %s: the file is all zero bytes (%d), there is no log data in it' % (name, len(d))
+        sample = bytes(d[:4096])
+        printable = sum(1 for b in sample if 32 <= b < 127 or b in (9, 10, 13))
+        if printable >= 0.95 * len(sample):
+            return ('Cannot decode %s: the file is text (starts %r), not a Zero binary log; '
+                    'only the binary .bin download can be decoded' % (name, bytes(sample[:24]).decode('ascii', 'replace')))
+        return ('Cannot decode %s: no log entries found (no event log header and no 0xB2 entry '
+                'marker in %d bytes); this is not a Zero binary log or its entry area is erased or damaged'
+                % (name, len(d)))
 
     log_type_mbb = 'MBB'
     log_type_bms = 'BMS'
@@ -6207,6 +6243,7 @@ class LogData(object):
 
             else:
                 # Legacy format - use original logic
+                log.require_length(0x252 + 17, 'the classic VIN fields')
                 vin_v0 = log.unpack_str(0x240, count=17)  # v0 (Gen2)
                 vin_v1 = log.unpack_str(0x252, count=17)  # v1 (Gen2 2019+)
                 vin_v2 = log.unpack_str(0x029, count=17, encoding='latin_1')  # v2 (Gen3)
@@ -6268,6 +6305,7 @@ class LogData(object):
                     logger.warning("VIN unreadable: %s", vin_v0)
                 elif name_vin and header_vin != name_vin:
                     logger.warning("VIN mismatch: header:%s filename:%s", header_vin, name_vin)
+                log.require_length(model_offset + 3, 'the model field')
                 sys_info['Model'] = log.unpack_str(model_offset, count=3)
                 sys_info['Initial date'] = log.unpack_str(0x2a, count=20)
         if len(sys_info) == 0 and (self.log_file.is_bms() or self.log_file.is_unknown()):
@@ -6339,6 +6377,7 @@ class LogData(object):
                             self.header_json_fields[json_key] = sys_info[key]
             else:
                 # Check for two log formats:
+                log.require_length(0x12 + 20, 'the classic BMS header')
                 log_version_code = log.unpack('uint8', 0x4)
                 # The layout tag is c0 c0 c0 c0 at 0x300, not byte 0x4.
                 # Byte 0x4 is a per-pack value: it is constant for a given
@@ -6363,6 +6402,7 @@ class LogData(object):
                     logger.warning("Unknown Log Format: %s", log_version_code)
                 sys_info['Initial date'] = log.unpack_str(0x12, count=20)
                 if log_version == REV0:
+                    log.require_length(0x320 + 8, 'the BMS serial numbers')
                     # Same idea as the REV1 shape gate below. REV0 board
                     # serials have the form YYYY_bms_xxxxxx_NNNNN, so the
                     # underscore is allowed here; pack serials never contain
@@ -6377,6 +6417,7 @@ class LogData(object):
                     sys_info['Pack serial number'] = (
                         pack_serial if re.fullmatch(r'[A-Za-z0-9-]{4,}', pack_serial) else 'Unknown')
                 elif log_version == REV1:
+                    log.require_length(0x331 + 8, 'the BMS serial numbers')
                     # Board serial: REV1's header carries the same 16-byte
                     # binary block REV0 also has (a counter/pointer run, not
                     # text) immediately before the board-serial string, so
@@ -6411,6 +6452,7 @@ class LogData(object):
                         sys_info['BMS serial number'] = 'Unknown'
                     sys_info['Pack serial number'] = log.unpack_str(0x331, count=8)
                 elif log_version == REV2:
+                    log.require_length(0x06c + 7, 'the BMS serial numbers')
                     sys_info['BMS serial number'] = log.unpack_str(0x038, count=13)
                     sys_info['Pack serial number'] = log.unpack_str(0x06c, count=7)
         elif self.log_file.is_unknown():
@@ -6476,6 +6518,10 @@ class LogData(object):
             else:
                 entries_end = len(raw_log)
                 entries_start = log.index_of_sequence(b'\xb2')
+                if entries_start is None:
+                    # No header and no entry marker anywhere: there is nothing
+                    # to walk. Was a bare "None >= int" TypeError below.
+                    raise UnreadableLogError(log.describe_no_entries())
                 entries_data_begin = entries_start
                 claimed_entries_count = 0
 
