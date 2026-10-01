@@ -109,6 +109,8 @@ def _payload(message_type, length):
         tag = 35 if message_type == 0x51 else Gen2.TELEMETRY_TIERS[message_type][2]
         buf[tag:tag + 4] = b'RUN\x00'
         buf[tag - 25] = 0                                   # validity flags clear: gated fields visible
+        for rel in (9, 13, 17, 21, 25):                     # the temperature words must hold a plausible value
+            struct.pack_into('<i', buf, tag + rel, 10)
         for key, offset in Gen2.TELEMETRY_TAIL_FIELDS.get((message_type, length), {}).items():
             if key == 'speed':
                 struct.pack_into('<I', buf, tag + offset, 3942 * Gen2.TELEMETRY_SPEED_STEP)

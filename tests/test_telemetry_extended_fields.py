@@ -42,9 +42,9 @@ def _payload(message_type, length, state=b'RUN\x00', flags=0, dc_bus_mv=105300, 
     buf[tag - 21:tag - 18] = dc_bus_mv.to_bytes(3, 'little')
     struct.pack_into('<i', buf, tag - 17, dc_bus_ma)
     struct.pack_into('<H', buf, tag - 13, rpm)
-    struct.pack_into('<h', buf, tag + 9, ambient_c100)
+    struct.pack_into('<i', buf, tag + 9, ambient_c100)
     for rel, value in zip((13, 17, 21, 25), temps):
-        buf[tag + rel] = value
+        struct.pack_into('<i', buf, tag + rel, value)
     buf[tag - 9] = 64
     struct.pack_into('<I', buf, tag - 8, 105144)
     struct.pack_into('<i', buf, tag - 4, 12273)
@@ -84,6 +84,26 @@ def test_dc_bus_current_and_ambient_temperature_are_signed():
     sd = _decode(0x52, _payload(0x52, 85, dc_bus_ma=-13100, ambient_c100=-98))['structured_data']
     assert sd['dc_bus_current_amps'] == -13.1
     assert sd['ambient_temperature_c'] == -0.98
+
+
+def test_temperatures_are_signed_32_bit_words_and_implausible_words_are_withheld():
+    for message_type, length in ((0x51, 64), (0x51, 68), (0x52, 85), (0x53, 99)):
+        sd = _decode(message_type, _payload(message_type, length, ambient_c100=-650,
+                                            temps=(-3, -128, -1, 127)))['structured_data']
+        assert sd['ambient_temperature_c'] == -6.5
+        assert sd['drive_temperature_1_c'] == -3
+        assert sd['drive_temperature_2_c'] == -128
+        assert sd['pack_temperature_warmest_c'] == -1
+        assert sd['pack_temperature_coldest_c'] == 127
+        tag = TAG[message_type]
+        # a word whose upper bytes are not a sign extension (an erased or overwritten entry tail)
+        payload = _payload(message_type, length)
+        payload[tag + 21:tag + 25] = bytes([0x1e, 0x00, 0xff, 0xff])
+        payload[tag + 9:tag + 13] = bytes([0x20, 0x4f, 0x01, 0x00])
+        sd = _decode(message_type, payload)['structured_data']
+        assert sd['pack_temperature_warmest_c'] is None
+        assert sd['ambient_temperature_c'] is None
+        assert sd['pack_temperature_coldest_c'] == 15
 
 
 def test_long_variants_carry_battery_12v_voltage_and_the_full_tail():

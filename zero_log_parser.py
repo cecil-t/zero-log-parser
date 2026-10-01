@@ -2829,11 +2829,11 @@ class Gen2:
         (-4, 4, 'battery_current_amps'),
         (0, 4, 'state'),
         (5, 1, 'validity_flags_copy'),
-        (9, 2, 'ambient_temperature_c'),
-        (13, 1, 'drive_temperature_1_c'),
-        (17, 1, 'drive_temperature_2_c'),
-        (21, 1, 'pack_temperature_warmest_c'),
-        (25, 1, 'pack_temperature_coldest_c'),
+        (9, 4, 'ambient_temperature_c'),
+        (13, 4, 'drive_temperature_1_c'),
+        (17, 4, 'drive_temperature_2_c'),
+        (21, 4, 'pack_temperature_warmest_c'),
+        (25, 4, 'pack_temperature_coldest_c'),
     )
     TELEMETRY_TAIL_WIDTHS = {'aux': (3, 'battery_12v_volts'), 'counter': (3, 'distance_km'),
                              'speed': (4, 'speed_raw'), 'range': (2, 'range_estimate_raw')}
@@ -2844,8 +2844,8 @@ class Gen2:
     # (message_type, length) -> {offset: evidence} for bytes that are not
     # fields but are provably not information (see above).
     TELEMETRY_RESERVED_BYTES = {
-        (0x51, 64): {6: "constant 0x00 in all 32395 marker-free accepted entries", 7: "constant 0x00 in all 32395 marker-free accepted entries", 8: "constant 0x00 in all 32395 marker-free accepted entries", 9: "constant 0x00 in all 32395 marker-free accepted entries", 11: "constant 0x00 in all 32395 marker-free accepted entries", 12: "constant 0x00 in all 32395 marker-free accepted entries", 13: "constant 0x00 in all 32395 marker-free accepted entries", 17: "constant 0x00 in all 32395 marker-free accepted entries", 24: "constant 0x00 in all 32395 marker-free accepted entries", 25: "constant 0x00 in all 32395 marker-free accepted entries", 39: "constant 0x00 in all 32395 marker-free accepted entries"},
-        (0x51, 68): {6: "constant 0x00 in all 42630 marker-free accepted entries", 7: "constant 0x00 in all 42630 marker-free accepted entries", 8: "constant 0x00 in all 42630 marker-free accepted entries", 9: "constant 0x00 in all 42630 marker-free accepted entries", 11: "constant 0x00 in all 42630 marker-free accepted entries", 12: "constant 0x00 in all 42630 marker-free accepted entries", 13: "constant 0x00 in all 42630 marker-free accepted entries", 17: "constant 0x00 in all 42630 marker-free accepted entries", 24: "constant 0x00 in all 42630 marker-free accepted entries", 25: "constant 0x00 in all 42630 marker-free accepted entries"},
+        (0x51, 64): {41: "zero in all but 2 of 32395 0x51/64 entries; those 2 (files 20250930_15.48_538ZFEZ79PCL23966_6, 20260801_16.09_538ZFCZ74NCP20356_6) have the entry tail erased to 0xff from this byte on, so the value is erase fill, not data", 42: "zero in all but 2 of 32395 0x51/64 entries; those 2 (files 20250930_15.48_538ZFEZ79PCL23966_6, 20260801_16.09_538ZFCZ74NCP20356_6) have the entry tail erased to 0xff from this byte on, so the value is erase fill, not data", 43: "zero in all but 2 of 32395 0x51/64 entries; those 2 (files 20250930_15.48_538ZFEZ79PCL23966_6, 20260801_16.09_538ZFCZ74NCP20356_6) have the entry tail erased to 0xff from this byte on, so the value is erase fill, not data", 6: "constant 0x00 in all 32395 marker-free accepted entries", 7: "constant 0x00 in all 32395 marker-free accepted entries", 8: "constant 0x00 in all 32395 marker-free accepted entries", 9: "constant 0x00 in all 32395 marker-free accepted entries", 11: "constant 0x00 in all 32395 marker-free accepted entries", 12: "constant 0x00 in all 32395 marker-free accepted entries", 13: "constant 0x00 in all 32395 marker-free accepted entries", 17: "constant 0x00 in all 32395 marker-free accepted entries", 24: "constant 0x00 in all 32395 marker-free accepted entries", 25: "constant 0x00 in all 32395 marker-free accepted entries", 39: "constant 0x00 in all 32395 marker-free accepted entries"},
+        (0x51, 68): {39: "zero in all but 1 of 42630 0x51/68 entries; that one (file 20250810_22.49_538ZFDZ76PCK25410_6, entry 682) has its tail overwritten by the ASCII text 'hanged. Old: 0x0000 New: 0x00', so the value is text, not data", 41: "zero in all but 1 of 42630 0x51/68 entries; that one (file 20250810_22.49_538ZFDZ76PCK25410_6, entry 682) has its tail overwritten by the ASCII text 'hanged. Old: 0x0000 New: 0x00', so the value is text, not data", 42: "zero in all but 1 of 42630 0x51/68 entries; that one (file 20250810_22.49_538ZFDZ76PCK25410_6, entry 682) has its tail overwritten by the ASCII text 'hanged. Old: 0x0000 New: 0x00', so the value is text, not data", 43: "zero in all but 1 of 42630 0x51/68 entries; that one (file 20250810_22.49_538ZFDZ76PCK25410_6, entry 682) has its tail overwritten by the ASCII text 'hanged. Old: 0x0000 New: 0x00', so the value is text, not data", 67: "zero in all but 1 of 42630 0x51/68 entries; that one (file 20250810_22.49_538ZFDZ76PCK25410_6, entry 682) has its tail overwritten by the ASCII text 'hanged. Old: 0x0000 New: 0x00', so the value is text, not data", 6: "constant 0x00 in all 42630 marker-free accepted entries", 7: "constant 0x00 in all 42630 marker-free accepted entries", 8: "constant 0x00 in all 42630 marker-free accepted entries", 9: "constant 0x00 in all 42630 marker-free accepted entries", 11: "constant 0x00 in all 42630 marker-free accepted entries", 12: "constant 0x00 in all 42630 marker-free accepted entries", 13: "constant 0x00 in all 42630 marker-free accepted entries", 17: "constant 0x00 in all 42630 marker-free accepted entries", 24: "constant 0x00 in all 42630 marker-free accepted entries", 25: "constant 0x00 in all 42630 marker-free accepted entries"},
         (0x52, 81): {6: "constant 0x00 in all 3468 marker-free accepted entries", 7: "constant 0x00 in all 3468 marker-free accepted entries", 8: "constant 0x00 in all 3468 marker-free accepted entries", 9: "constant 0x00 in all 3468 marker-free accepted entries", 11: "constant 0x00 in all 3468 marker-free accepted entries", 12: "constant 0x00 in all 3468 marker-free accepted entries", 13: "constant 0x00 in all 3468 marker-free accepted entries", 15: "constant 0x00 in all 3468 marker-free accepted entries", 16: "constant 0x00 in all 3468 marker-free accepted entries", 17: "constant 0x00 in all 3468 marker-free accepted entries", 21: "constant 0x00 in all 3468 marker-free accepted entries", 28: "constant 0x00 in all 3468 marker-free accepted entries", 29: "constant 0x00 in all 3468 marker-free accepted entries", 43: "constant 0x00 in all 3468 marker-free accepted entries", 45: "constant 0x00 in all 3468 marker-free accepted entries", 46: "constant 0x00 in all 3468 marker-free accepted entries", 47: "constant 0x00 in all 3468 marker-free accepted entries", 53: "constant 0x00 in all 3468 marker-free accepted entries", 54: "constant 0x00 in all 3468 marker-free accepted entries", 55: "constant 0x00 in all 3468 marker-free accepted entries"},
         (0x52, 85): {6: "constant 0x00 in all 5561 marker-free accepted entries", 7: "constant 0x00 in all 5561 marker-free accepted entries", 8: "constant 0x00 in all 5561 marker-free accepted entries", 9: "constant 0x00 in all 5561 marker-free accepted entries", 11: "constant 0x00 in all 5561 marker-free accepted entries", 12: "constant 0x00 in all 5561 marker-free accepted entries", 13: "constant 0x00 in all 5561 marker-free accepted entries", 15: "constant 0x00 in all 5561 marker-free accepted entries", 16: "constant 0x00 in all 5561 marker-free accepted entries", 17: "constant 0x00 in all 5561 marker-free accepted entries", 21: "constant 0x00 in all 5561 marker-free accepted entries", 28: "constant 0x00 in all 5561 marker-free accepted entries", 29: "constant 0x00 in all 5561 marker-free accepted entries", 43: "constant 0x00 in all 5561 marker-free accepted entries", 45: "constant 0x00 in all 5561 marker-free accepted entries", 46: "constant 0x00 in all 5561 marker-free accepted entries", 47: "constant 0x00 in all 5561 marker-free accepted entries", 53: "constant 0x00 in all 5561 marker-free accepted entries", 54: "constant 0x00 in all 5561 marker-free accepted entries", 55: "constant 0x00 in all 5561 marker-free accepted entries", 57: "constant 0x00 in all 5561 marker-free accepted entries", 58: "constant 0x00 in all 5561 marker-free accepted entries", 59: "constant 0x00 in all 5561 marker-free accepted entries", 61: "constant 0x00 in all 5561 marker-free accepted entries", 62: "constant 0x00 in all 5561 marker-free accepted entries", 63: "constant 0x00 in all 5561 marker-free accepted entries", 65: "constant 0x00 in all 5561 marker-free accepted entries", 66: "constant 0x00 in all 5561 marker-free accepted entries", 67: "constant 0x00 in all 5561 marker-free accepted entries", 71: "constant 0x00 in all 5561 marker-free accepted entries", 77: "constant 0x00 in all 5561 marker-free accepted entries", 84: "constant 0x00 in all 5561 marker-free accepted entries"},
         (0x53, 93): {},
@@ -3274,6 +3274,16 @@ class Gen2:
         return soc, volts, amps, f'SOC:{soc}%, Vpack:{v_text}V, I:{i_text}A'
 
     @classmethod
+    def telemetry_temperature(cls, x, offset, limit, scale=1.0):
+        """A temperature stored as a little-endian int32 whose real range is
+        -limit .. limit-1 (before scaling); None when the word is outside it,
+        which only happens in entries whose tail was erased or overwritten."""
+        value = BinaryTools.unpack('int32', x, offset)
+        if not -limit <= value < limit:
+            return None
+        return value / scale if scale != 1.0 else value
+
+    @classmethod
     def telemetry_extended_fields(cls, message_type, x, tag_offset):
         """Decode the DC bus, RPM, temperature, validity and tail fields that
         types 0x51 / 0x52 / 0x53 share. Returns (structured_data updates,
@@ -3289,11 +3299,20 @@ class Gen2:
         dc_bus_mv = int.from_bytes(bytes(x[tag_offset - 21:tag_offset - 18]), 'little')
         dc_bus_ma = BinaryTools.unpack('int32', x, tag_offset - 17)
         rpm = BinaryTools.unpack('uint16', x, tag_offset - 13)
-        ambient = BinaryTools.unpack('int16', x, tag_offset + 9) / 100.0
-        drive_t1 = BinaryTools.unpack('uint8', x, tag_offset + 13)
-        drive_t2 = BinaryTools.unpack('uint8', x, tag_offset + 17)
-        pack_warm_t = BinaryTools.unpack('uint8', x, tag_offset + 21)
-        pack_cold_t = BinaryTools.unpack('uint8', x, tag_offset + 25)
+        # The five temperatures are signed 32-bit words (tag+9, +13, +17, +21,
+        # +25), not narrower fields: whenever a temperature is negative the
+        # three bytes above its low byte are 0xff (every negative
+        # reading in the corpus, with no counterexample that is not an erased
+        # or overwritten entry tail; analysis/coverage_rebaseline_damaged.md
+        # Part 2A). Until this change drive and pack temperatures were read
+        # as unsigned bytes, so -3 C showed as 253. A word that is not a
+        # plausible sign extension (an entry whose tail was erased to 0xff
+        # or overwritten by text) is withheld as None.
+        ambient = cls.telemetry_temperature(x, tag_offset + 9, 32768, 100.0)
+        drive_t1 = cls.telemetry_temperature(x, tag_offset + 13, 128)
+        drive_t2 = cls.telemetry_temperature(x, tag_offset + 17, 128)
+        pack_warm_t = cls.telemetry_temperature(x, tag_offset + 21, 128)
+        pack_cold_t = cls.telemetry_temperature(x, tag_offset + 25, 128)
 
         # tag+5 is a second copy of the tag-25 validity byte (0x51 payload 40,
         # 0x52 payload 44, 0x53 payload 48), analysis/gen3_page_claims.md
@@ -3323,10 +3342,10 @@ class Gen2:
         conditions = (
             f"Vdc:{fmt(data['dc_bus_voltage_volts'], '.1f')}V, "
             f"Idc:{fmt(data['dc_bus_current_amps'], '.1f')}A, "
-            f"RPM:{fmt(data['motor_rpm'])}, Tamb:{ambient:.2f}C, "
+            f"RPM:{fmt(data['motor_rpm'])}, Tamb:{fmt(ambient, '.2f')}C, "
             f"Tdrive1:{fmt(data['drive_temperature_1_c'])}C, "
             f"Tdrive2:{fmt(data['drive_temperature_2_c'])}C, "
-            f"Tpack:{pack_warm_t}/{pack_cold_t}C"
+            f"Tpack:{fmt(pack_warm_t)}/{fmt(pack_cold_t)}C"
         )
 
         tail = cls.TELEMETRY_TAIL_FIELDS.get((message_type, len(x)), {})
