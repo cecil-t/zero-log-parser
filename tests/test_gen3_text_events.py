@@ -160,15 +160,19 @@ def test_damaged_tail_bytes_are_shown_as_undecoded_hex_not_garbage():
     assert entry['event'] == 'Saving stats,{undecoded hex: b3 46 4d e2}'
 
 
-def test_prefix_damage_without_a_marker_is_undecodable_and_not_guessed():
-    payload = bytearray(b'p_\xfe\xff\xff\xff\x1d\xd8\x03\x04\x06')
-    entry = _parse(bytearray(b'p_\xfa\xff\xff\xff\x1d\xd8\x03\x04\x06'), gen3_text=True)
-    assert entry['event'].startswith('{undecoded hex: 70 5f fa ff ff ff')
+def test_prefix_damage_without_a_marker_is_left_to_the_legacy_decoder():
+    damaged = bytearray(b'p_\xfa\xff\xff\xff\x1d\xd8\x03\x04\x06')
+    assert Gen2.gen3_text_message(damaged) is None
+    assert _parse(damaged, gen3_text=True)['event'] == _parse(damaged, gen3_text=False)['event']
+    # a legacy BMS sibling-format entry: two odd bytes then plain text, unchanged
+    sibling = bytearray(b'\x90\xd6full_precharge: 132, command_delay: 5\x00')
+    assert _parse(sibling, gen3_text=True)['event'] == _parse(sibling, gen3_text=False)['event']
     # a marker over the sub-second field leaves the message readable
-    damaged = bytearray(ARTIFACT[:4] + b'\x01\x01' + b'Fault cleared: HVIL_OPEN\x00')
-    entry = _parse(damaged, gen3_text=True)
+    marked = bytearray(ARTIFACT[:4] + b'\x01\x01' + b'Fault cleared: HVIL_OPEN\x00')
+    entry = _parse(marked, gen3_text=True)
     assert entry['event'] == 'Fault cleared: HVIL_OPEN'
     assert entry['structured_data']['fault_code'] == 'HVIL_OPEN'
+
 
 
 def test_plain_text_entries_in_a_rev3_file_are_left_to_the_legacy_decoder():

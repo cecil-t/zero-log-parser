@@ -1490,16 +1490,16 @@ class Gen2:
         ASCII (damaged tails) are shown as an undecoded-hex tag, never
         guessed at.
 
-        Returns a dict, or None when the payload cannot be a Gen3 text entry
-        (too short, or plain text with no prefix):
+        Returns a dict, or None when the payload is not a Gen3 text entry this
+        helper can read (too short, plain text with no prefix, or a prefix that
+        fails the gate with no marker to explain it; the caller then uses the
+        legacy decoder unchanged):
           display       text for the event, markers and odd bytes tagged
           parse_text    the message with each marker simply removed (the form
                         gen3_text_event() has always matched against), or None
                         if it holds a non-printable byte
           bytes_lost    bytes the marker(s) destroyed inside the message
           prefix_damaged  True when the marker overlapped the 6-byte prefix
-          undecodable   True when the prefix is damaged without a marker to
-                        explain it; display is then the undecoded hex tag
         """
         marker = cls.PAGE_MARKER
         if len(x) <= 6:
@@ -1519,8 +1519,11 @@ class Gen2:
         at = bytes(x[:9]).find(marker)
         if at < 0:
             if gate_failed:
-                return {'display': cls.undecoded_hex_display(x), 'parse_text': None,
-                        'bytes_lost': 0, 'prefix_damaged': True, 'undecodable': True}
+                # Not a plausible FST prefix and no marker to explain the damage
+                # (for example the legacy 131,200-byte BMS files, whose text
+                # production already reads correctly): leave it to the legacy
+                # decoder rather than guess.
+                return None
         else:
             # A marker that starts inside the prefix (or ends inside the first
             # message bytes): the prefix is damaged, and any part of the marker
@@ -1567,7 +1570,7 @@ class Gen2:
         display = lead + ''.join(parts)
         parse_text = parse.decode('ascii') if parse_ok and parse else None
         return {'display': display, 'parse_text': parse_text, 'bytes_lost': lost,
-                'prefix_damaged': prefix_damaged, 'undecodable': False}
+                'prefix_damaged': prefix_damaged}
 
     @classmethod
     def gen3_debug_message(cls, x):
@@ -1576,12 +1579,6 @@ class Gen2:
         rendered = cls.gen3_text_message(x)
         if rendered is None:
             return cls.debug_message(x)
-        if rendered['undecodable']:
-            return {
-                'event': rendered['display'],
-                'log_level': 'WARNING',
-                'structured_data': {'raw_hex': bytes(x).hex()},
-            }
         structured = cls._gen3_text_structured(rendered['parse_text'])
         entry = cls._debug_text_entry(rendered['display'], structured)
         if not any(c.isalnum() for c in re.sub(r'\{[^}]*\}', '', rendered['display'])):
@@ -1598,7 +1595,7 @@ class Gen2:
         """Structured numbers from a Gen3 0xFD text entry, or None. See
         gen3_text_message() for the text handling."""
         rendered = cls.gen3_text_message(x)
-        if rendered is None or rendered['undecodable']:
+        if rendered is None:
             return None
         return cls._gen3_text_structured(rendered['parse_text'])
 
