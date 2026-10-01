@@ -193,10 +193,10 @@ def test_sort_timestamp_is_utc_epoch_whatever_the_host_timezone():
     assert {e['entry_number']: e['sort_timestamp'] for e in a}[3] == T1
 
 
-# --- rolling future limit: UTC date at parse time plus 1 year, end of that day ---
+# --- rolling future limit: UTC date at parse time plus 30 months, end of that day ---
 
 FIXED_NOW = datetime(2026, 10, 1, 12, 0, 0, tzinfo=timezone.utc)
-LIMIT_2026 = 1_822_435_199        # 2027-10-01 23:59:59 UTC
+LIMIT_2026 = 1_869_782_399        # 2029-04-01 23:59:59 UTC
 
 
 def _with_now(now, fn):
@@ -208,7 +208,7 @@ def _with_now(now, fn):
         Gen2.utc_now = old
 
 
-def test_clock_max_is_end_of_utc_day_one_year_on():
+def test_clock_max_is_end_of_utc_day_thirty_months_on():
     assert Gen2.clock_max(FIXED_NOW) == LIMIT_2026
     assert Gen2.clock_max(datetime(2026, 10, 1, 0, 0, 0, tzinfo=timezone.utc)) == LIMIT_2026
     assert Gen2.clock_max(datetime(2026, 10, 1, 23, 59, 59, tzinfo=timezone.utc)) == LIMIT_2026
@@ -218,15 +218,17 @@ def test_clock_max_is_end_of_utc_day_one_year_on():
     from datetime import timedelta
     ny = timezone(timedelta(hours=-5))
     assert Gen2.clock_max(datetime(2026, 9, 30, 22, 0, 0, tzinfo=ny)) == LIMIT_2026
-    # 29 February falls back to 28 February
-    assert Gen2.clock_max(datetime(2028, 2, 29, 5, 0, 0, tzinfo=timezone.utc)) == \
+    # a day missing in the target month becomes that month's last day
+    assert Gen2.clock_max(datetime(2026, 8, 31, 5, 0, 0, tzinfo=timezone.utc)) == \
         int(datetime(2029, 2, 28, 23, 59, 59, tzinfo=timezone.utc).timestamp())
+    assert Gen2.clock_max(datetime(2028, 2, 29, 5, 0, 0, tzinfo=timezone.utc)) == \
+        int(datetime(2030, 8, 29, 23, 59, 59, tzinfo=timezone.utc).timestamp())
 
 
 def test_default_now_is_the_real_clock():
     lim = Gen2.clock_max()
-    assert lim > int(datetime.now(timezone.utc).timestamp()) + 364 * 86400
-    assert lim < int(datetime.now(timezone.utc).timestamp()) + 367 * 86400 + 86400
+    now = int(datetime.now(timezone.utc).timestamp())
+    assert now + 29 * 30 * 86400 < lim < now + 31 * 31 * 86400
 
 
 def _sources(raws, now):
@@ -246,20 +248,80 @@ def test_boundary_just_inside_and_just_outside_the_window():
 
 
 def test_far_future_is_invalid_and_the_window_moves_with_the_calendar():
-    jun_2029 = 1_874_966_400     # 2029-06-01: nearly three years past FIXED_NOW
-    assert _sources([jun_2029], FIXED_NOW) == ['invalid']
-    # the same value is an ordinary date when parsed in mid-2028 (within a year)
-    later = datetime(2028, 6, 15, tzinfo=timezone.utc)
-    assert _sources([jun_2029], later) == ['clock']
+    jun_2031 = 1_938_902_400     # 2031-06-01: beyond FIXED_NOW's window
+    assert _sources([jun_2031], FIXED_NOW) == ['invalid']
+    # the same value is an ordinary date when parsed in mid-2029
+    later = datetime(2029, 6, 15, tzinfo=timezone.utc)
+    assert _sources([jun_2031], later) == ['clock']
 
 
-def test_a_future_value_does_not_backfill_its_neighbours():
-    # an out-of-window value must not anchor the cycle: the uptime entries before it stay undated
-    es = _with_now(FIXED_NOW, lambda: _by_number(_entries(_log((0, OPEN), (5, CLOSE), (1_874_966_400, REG)))))
-    assert es[1]['time_source'] == 'uptime' and es[2]['time_source'] == 'uptime'
-    assert es[3]['time_source'] == 'invalid'
+def test_value_between_the_window_and_2030_is_invalid_now():
+    # 2030-06-01 is before the old fixed limit but about 3.7 years past FIXED_NOW
+    assert _sources([1_906_502_400], FIXED_NOW) == ['invalid']
 
 
 def test_lower_bound_is_unchanged():
     # one below the bound is uptime (backfilled here because a date follows in the same cycle)
     assert _sources([1_262_304_000 - 1, 1_262_304_000], FIXED_NOW) == ['backfilled', 'clock']
+
+
+# --- backfill anchor rule ---
+
+def _times(raws, now=FIXED_NOW):
+    es = _with_now(now, lambda: _by_number(_entries(_log(*[(r, OPEN) for r in raws]))))
+    return {n: (e['time_source'], e['sort_timestamp']) for n, e in es.items()}
+
+
+def test_long_forward_gap_does_not_reject_the_anchor():
+    d30 = 30 * 86400
+    t = _times([0, 7, T1, T1 + d30, T1 + d30 + 5])
+    assert t[1] == ('backfilled', T1 - 7) and t[2] == ('backfilled', T1)
+
+
+def test_future_outlier_is_rejected_and_next_clock_entry_anchors():
+    # A is two hours after its successor: N anchors, with the same arithmetic
+    n = T1 - 7200
+    t = _times([0, 4, T1, n, n + 5])
+    assert t[3] == ('clock', T1)          # A stays a clock entry
+    assert t[1] == ('backfilled', n - 4) and t[2] == ('backfilled', n)
+
+
+def test_future_outlier_fallback_needs_n_near_its_neighbours():
+    # N is more than 10 minutes from the clock entry after it: boot entries stay uptime
+    n = T1 - 7200
+    t = _times([0, 4, T1, n, n + 2000])
+    assert t[1][0] == 'uptime' and t[2][0] == 'uptime'
+    assert t[3][0] == 'clock'
+
+
+def test_within_sixty_seconds_is_not_an_outlier():
+    t = _times([0, 4, T1 + 60, T1, T1 + 5])      # A later than N by exactly 60 s: kept
+    assert t[1][0] == 'backfilled' and t[2] == ('backfilled', T1 + 60)
+
+
+def test_past_outlier_with_agreeing_neighbours_is_rejected():
+    # previous cycle ends at T1 + 1000; A is 500 s earlier; N agrees with P
+    p = T1 + 1000
+    t = _times([T1, p, 0, 3, p - 500, p + 100, p + 105])
+    assert t[5] == ('clock', p - 500)
+    # N (p + 100) is within 10 minutes of P and of M (p + 105): N anchors
+    assert t[4] == ('backfilled', p + 100)
+    assert t[3] == ('backfilled', p + 100 - 3)
+
+
+def test_past_step_where_n_also_stepped_back_is_a_wrap_not_an_outlier():
+    # P = T1 + 1000, A and N both well before P (a ring buffer wrap or a clock reset): A kept
+    p = T1 + 1000
+    t = _times([T1, p, 0, 3, T1 - 5000, T1 - 4990, T1 - 4980])
+    assert t[4][1] == T1 - 5000 and t[3][1] == T1 - 5000 - 3
+
+
+def test_single_clock_entry_keeps_its_anchor():
+    t = _times([T1, T1 + 5, 0, 3, T1 - 90000])     # A earlier than P by a day, but no N
+    assert t[4][1] == T1 - 90000 and t[3][0] == 'backfilled'
+
+
+def test_rejected_a_is_still_displayed_as_decoded():
+    n = T1 - 7200
+    es = _with_now(FIXED_NOW, lambda: _by_number(_entries(_log((0, OPEN), (4, CLOSE), (T1, REG), (n, OPEN), (n + 5, CLOSE)))))
+    assert es[3]['timestamp'] == time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(T1)) and es[3]['time_source'] == 'clock'
