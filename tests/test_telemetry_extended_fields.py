@@ -189,3 +189,16 @@ def test_conditions_strings_carry_the_new_fields():
 def test_shipped_0x51_temperature_keys_are_unchanged():
     sd = _decode(0x51, _payload(0x51, 64))['structured_data']
     assert (sd['temperature_1_celsius'], sd['temperature_4_celsius']) == (42, 15)
+
+
+def test_validity_flags_copy_is_the_raw_byte_at_tag_plus_5_and_derives_nothing():
+    for message_type, length in ((0x51, 64), (0x51, 68), (0x52, 81), (0x52, 85), (0x53, 95), (0x53, 99)):
+        payload = _payload(message_type, length, flags=0x0a)
+        payload[TAG[message_type] + 5] = 0x3c
+        sd = _decode(message_type, payload)['structured_data']
+        assert sd['validity_flags_copy'] == 0x3c
+        # tag-25 stays authoritative: the copy value does not change the validity booleans
+        assert sd['motor_controller_data_valid'] is False and sd['bms_data_valid'] is True
+        payload[TAG[message_type] + 5] = 0x00
+        sd = _decode(message_type, payload)['structured_data']
+        assert sd['validity_flags_copy'] == 0 and sd['motor_controller_data_valid'] is False

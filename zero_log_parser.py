@@ -917,7 +917,7 @@ class Gen2:
         not identified and stay in raw_hex with the rest of the payload.
         Any other length falls back to unhandled_entry_format().
         """
-        if len(x) != 10:
+        if len(x) != cls.BMS_STORAGE_STATS_LENGTH:
             return cls.unhandled_entry_format(0x0f, x)
 
         low_mv = BinaryTools.unpack('uint16', x, 0x03)
@@ -2398,7 +2398,7 @@ class Gen2:
 
     @classmethod
     def gen3_firmware_build_info(cls, x):
-        if len(x) not in (58, 60):
+        if len(x) not in cls.GEN3_FIRMWARE_BUILD_INFO_LENGTHS:
             return cls.unhandled_entry_format(0x4e, x)
 
         prefix = cls.fst_entry_prefix(x)
@@ -2786,6 +2786,471 @@ class Gen2:
     # gen3_page_claims.md, Phase 3 Part 1 and Phase 4 Item 3).
     TELEMETRY_DISTANCE_KM_PER_UNIT = 0.1
 
+    # --- Declared payload layouts (analysis/coverage_rebaseline_layouts.md) ---
+    # What every payload byte of a decoder that keeps raw_hex is. The coverage
+    # classifier (tools/coverage_audit.py) reads this instead of treating the
+    # mere presence of raw_hex as "partially decoded". Each offset is exactly
+    # one of:
+    #   field     consumed into a named structured value
+    #   reserved  provably not information: exactly constant in every
+    #             corpus entry of that type and length whose page-marker-free
+    #             bytes were measured (the entry is excluded from the test
+    #             only if the 00 f0 ff 00 marker overwrote some of its
+    #             bytes), a byte proven to duplicate another decoded byte,
+    #             or a structural byte with a documented role
+    #   unknown   not understood yet. A byte that is near-constant but varies
+    #             even rarely is unknown, not reserved: several real fields
+    #             (the BMS fault-flag bytes) are near-constant with rare
+    #             meaningful exceptions.
+    # payload_layout() returns the segments of one (type, length) as
+    # (start, stop, kind, label) with stop exclusive, covering the payload
+    # exactly; label is the field name, the reserved evidence, or a note for
+    # unknown bytes. It returns None for a type and length no raw_hex
+    # decoder accepts. Nothing here is added to structured_data.
+    LAYOUT_FIELD = 'field'
+    LAYOUT_RESERVED = 'reserved'
+    LAYOUT_UNKNOWN = 'unknown'
+
+    # Tag-relative layout shared by 0x51 / 0x52 / 0x53 (rel = payload offset
+    # minus the start of the 4-byte state tag): (rel_start, width, name).
+    # Resolved per length by payload_layout(); the bytes the tiers insert
+    # between the prefix and this block, and any bytes between fields, are
+    # reserved or unknown according to TELEMETRY_RESERVED_BYTES.
+    TELEMETRY_LAYOUT_PREFIX = (
+        (0, 4, 'subsecond_us'), (4, 1, 'sequence'), (5, 1, 'marker'),
+    )
+    TELEMETRY_LAYOUT_REL = (
+        (-25, 1, 'motor_controller_data_valid/bms_data_valid'),
+        (-21, 3, 'dc_bus_voltage_volts'),
+        (-17, 4, 'dc_bus_current_amps'),
+        (-13, 2, 'motor_rpm'),
+        (-9, 1, 'state_of_charge_percent'),
+        (-8, 4, 'pack_voltage_volts'),
+        (-4, 4, 'battery_current_amps'),
+        (0, 4, 'state'),
+        (5, 1, 'validity_flags_copy'),
+        (9, 2, 'ambient_temperature_c'),
+        (13, 1, 'drive_temperature_1_c'),
+        (17, 1, 'drive_temperature_2_c'),
+        (21, 1, 'pack_temperature_warmest_c'),
+        (25, 1, 'pack_temperature_coldest_c'),
+    )
+    TELEMETRY_TAIL_WIDTHS = {'aux': (3, 'battery_12v_volts'), 'counter': (3, 'distance_km'),
+                             'speed': (4, 'speed_raw'), 'range': (2, 'range_estimate_raw')}
+    VEHICLE_STATE_TELEMETRY_LENGTHS = (64, 68)
+    BMS_STORAGE_STATS_LENGTH = 10
+    HIGH_MOTOR_CONTROLLER_TEMP_LENGTH = 6
+    GEN3_FIRMWARE_BUILD_INFO_LENGTHS = (58, 60)
+    # (message_type, length) -> {offset: evidence} for bytes that are not
+    # fields but are provably not information (see above).
+    TELEMETRY_RESERVED_BYTES = {
+        (0x51, 64): {6: "constant 0x00 in all 32395 marker-free accepted entries", 7: "constant 0x00 in all 32395 marker-free accepted entries", 8: "constant 0x00 in all 32395 marker-free accepted entries", 9: "constant 0x00 in all 32395 marker-free accepted entries", 11: "constant 0x00 in all 32395 marker-free accepted entries", 12: "constant 0x00 in all 32395 marker-free accepted entries", 13: "constant 0x00 in all 32395 marker-free accepted entries", 17: "constant 0x00 in all 32395 marker-free accepted entries", 24: "constant 0x00 in all 32395 marker-free accepted entries", 25: "constant 0x00 in all 32395 marker-free accepted entries", 39: "constant 0x00 in all 32395 marker-free accepted entries"},
+        (0x51, 68): {6: "constant 0x00 in all 42630 marker-free accepted entries", 7: "constant 0x00 in all 42630 marker-free accepted entries", 8: "constant 0x00 in all 42630 marker-free accepted entries", 9: "constant 0x00 in all 42630 marker-free accepted entries", 11: "constant 0x00 in all 42630 marker-free accepted entries", 12: "constant 0x00 in all 42630 marker-free accepted entries", 13: "constant 0x00 in all 42630 marker-free accepted entries", 17: "constant 0x00 in all 42630 marker-free accepted entries", 24: "constant 0x00 in all 42630 marker-free accepted entries", 25: "constant 0x00 in all 42630 marker-free accepted entries"},
+        (0x52, 81): {6: "constant 0x00 in all 3468 marker-free accepted entries", 7: "constant 0x00 in all 3468 marker-free accepted entries", 8: "constant 0x00 in all 3468 marker-free accepted entries", 9: "constant 0x00 in all 3468 marker-free accepted entries", 11: "constant 0x00 in all 3468 marker-free accepted entries", 12: "constant 0x00 in all 3468 marker-free accepted entries", 13: "constant 0x00 in all 3468 marker-free accepted entries", 15: "constant 0x00 in all 3468 marker-free accepted entries", 16: "constant 0x00 in all 3468 marker-free accepted entries", 17: "constant 0x00 in all 3468 marker-free accepted entries", 21: "constant 0x00 in all 3468 marker-free accepted entries", 28: "constant 0x00 in all 3468 marker-free accepted entries", 29: "constant 0x00 in all 3468 marker-free accepted entries", 43: "constant 0x00 in all 3468 marker-free accepted entries", 45: "constant 0x00 in all 3468 marker-free accepted entries", 46: "constant 0x00 in all 3468 marker-free accepted entries", 47: "constant 0x00 in all 3468 marker-free accepted entries", 53: "constant 0x00 in all 3468 marker-free accepted entries", 54: "constant 0x00 in all 3468 marker-free accepted entries", 55: "constant 0x00 in all 3468 marker-free accepted entries"},
+        (0x52, 85): {6: "constant 0x00 in all 5561 marker-free accepted entries", 7: "constant 0x00 in all 5561 marker-free accepted entries", 8: "constant 0x00 in all 5561 marker-free accepted entries", 9: "constant 0x00 in all 5561 marker-free accepted entries", 11: "constant 0x00 in all 5561 marker-free accepted entries", 12: "constant 0x00 in all 5561 marker-free accepted entries", 13: "constant 0x00 in all 5561 marker-free accepted entries", 15: "constant 0x00 in all 5561 marker-free accepted entries", 16: "constant 0x00 in all 5561 marker-free accepted entries", 17: "constant 0x00 in all 5561 marker-free accepted entries", 21: "constant 0x00 in all 5561 marker-free accepted entries", 28: "constant 0x00 in all 5561 marker-free accepted entries", 29: "constant 0x00 in all 5561 marker-free accepted entries", 43: "constant 0x00 in all 5561 marker-free accepted entries", 45: "constant 0x00 in all 5561 marker-free accepted entries", 46: "constant 0x00 in all 5561 marker-free accepted entries", 47: "constant 0x00 in all 5561 marker-free accepted entries", 53: "constant 0x00 in all 5561 marker-free accepted entries", 54: "constant 0x00 in all 5561 marker-free accepted entries", 55: "constant 0x00 in all 5561 marker-free accepted entries", 57: "constant 0x00 in all 5561 marker-free accepted entries", 58: "constant 0x00 in all 5561 marker-free accepted entries", 59: "constant 0x00 in all 5561 marker-free accepted entries", 61: "constant 0x00 in all 5561 marker-free accepted entries", 62: "constant 0x00 in all 5561 marker-free accepted entries", 63: "constant 0x00 in all 5561 marker-free accepted entries", 65: "constant 0x00 in all 5561 marker-free accepted entries", 66: "constant 0x00 in all 5561 marker-free accepted entries", 67: "constant 0x00 in all 5561 marker-free accepted entries", 71: "constant 0x00 in all 5561 marker-free accepted entries", 77: "constant 0x00 in all 5561 marker-free accepted entries", 84: "constant 0x00 in all 5561 marker-free accepted entries"},
+        (0x53, 93): {},
+        (0x53, 95): {6: "constant 0x00 in all 2695 marker-free accepted entries", 7: "constant 0x00 in all 2695 marker-free accepted entries", 8: "constant 0x00 in all 2695 marker-free accepted entries", 9: "constant 0x00 in all 2695 marker-free accepted entries", 11: "constant 0x00 in all 2695 marker-free accepted entries", 12: "constant 0x00 in all 2695 marker-free accepted entries", 13: "constant 0x00 in all 2695 marker-free accepted entries", 15: "constant 0x00 in all 2695 marker-free accepted entries", 16: "constant 0x00 in all 2695 marker-free accepted entries", 17: "constant 0x00 in all 2695 marker-free accepted entries", 19: "constant 0x00 in all 2695 marker-free accepted entries", 20: "constant 0x00 in all 2695 marker-free accepted entries", 21: "constant 0x00 in all 2695 marker-free accepted entries", 25: "constant 0x00 in all 2695 marker-free accepted entries", 32: "constant 0x00 in all 2695 marker-free accepted entries", 33: "constant 0x00 in all 2695 marker-free accepted entries", 47: "constant 0x00 in all 2695 marker-free accepted entries", 49: "constant 0x00 in all 2695 marker-free accepted entries", 50: "constant 0x00 in all 2695 marker-free accepted entries", 51: "constant 0x00 in all 2695 marker-free accepted entries", 57: "constant 0x00 in all 2695 marker-free accepted entries", 58: "constant 0x00 in all 2695 marker-free accepted entries", 59: "constant 0x00 in all 2695 marker-free accepted entries", 61: "constant 0x00 in all 2695 marker-free accepted entries", 62: "constant 0x00 in all 2695 marker-free accepted entries", 63: "constant 0x00 in all 2695 marker-free accepted entries"},
+        (0x53, 99): {6: "constant 0x00 in all 4686 marker-free accepted entries", 7: "constant 0x00 in all 4686 marker-free accepted entries", 8: "constant 0x00 in all 4686 marker-free accepted entries", 9: "constant 0x00 in all 4686 marker-free accepted entries", 10: "constant 0x00 in all 4686 marker-free accepted entries", 11: "constant 0x00 in all 4686 marker-free accepted entries", 12: "constant 0x00 in all 4686 marker-free accepted entries", 13: "constant 0x00 in all 4686 marker-free accepted entries", 15: "constant 0x00 in all 4686 marker-free accepted entries", 16: "constant 0x00 in all 4686 marker-free accepted entries", 17: "constant 0x00 in all 4686 marker-free accepted entries", 19: "constant 0x00 in all 4686 marker-free accepted entries", 20: "constant 0x00 in all 4686 marker-free accepted entries", 21: "constant 0x00 in all 4686 marker-free accepted entries", 25: "constant 0x00 in all 4686 marker-free accepted entries", 32: "constant 0x00 in all 4686 marker-free accepted entries", 33: "constant 0x00 in all 4686 marker-free accepted entries", 47: "constant 0x00 in all 4686 marker-free accepted entries", 49: "constant 0x00 in all 4686 marker-free accepted entries", 50: "constant 0x00 in all 4686 marker-free accepted entries", 51: "constant 0x00 in all 4686 marker-free accepted entries", 57: "constant 0x00 in all 4686 marker-free accepted entries", 58: "constant 0x00 in all 4686 marker-free accepted entries", 59: "constant 0x00 in all 4686 marker-free accepted entries", 61: "constant 0x00 in all 4686 marker-free accepted entries", 62: "constant 0x00 in all 4686 marker-free accepted entries", 63: "constant 0x00 in all 4686 marker-free accepted entries", 65: "constant 0x00 in all 4686 marker-free accepted entries", 66: "constant 0x00 in all 4686 marker-free accepted entries", 67: "constant 0x00 in all 4686 marker-free accepted entries", 69: "constant 0x00 in all 4686 marker-free accepted entries", 70: "constant 0x00 in all 4686 marker-free accepted entries", 71: "constant 0x00 in all 4686 marker-free accepted entries", 75: "constant 0x00 in all 4686 marker-free accepted entries", 81: "constant 0x00 in all 4686 marker-free accepted entries", 88: "constant 0x00 in all 4686 marker-free accepted entries", 90: "constant 0x00 in all 4686 marker-free accepted entries", 91: "constant 0x00 in all 4686 marker-free accepted entries", 92: "constant 0x00 in all 4686 marker-free accepted entries", 93: "constant 0x00 in all 4686 marker-free accepted entries", 94: "constant 0x00 in all 4686 marker-free accepted entries", 95: "constant 0x00 in all 4686 marker-free accepted entries", 96: "constant 0x00 in all 4686 marker-free accepted entries", 97: "constant 0x00 in all 4686 marker-free accepted entries", 98: "constant 0x00 in all 4686 marker-free accepted entries"},
+    }
+    # Absolute layouts for the decoders whose fields are not tag-relative:
+    # (message_type, length) -> ((start, stop, kind, label), ...).
+    PAYLOAD_LAYOUT_TABLE = {
+        (0xf, 10): (
+            (0, 2, 'unknown', 'not understood yet'),
+            (2, 3, 'field', 'balance_resistors_active'),
+            (3, 5, 'field', 'voltage_low_cell_volts'),
+            (5, 7, 'field', 'voltage_high_cell_volts'),
+            (7, 9, 'field', 'voltage_balance_mv'),
+            (9, 10, 'field', 'bms_temp_celsius'),
+        ),
+        (0x26, 6): (
+            (0, 2, 'field', 'motor_temp_celsius'),
+            (2, 4, 'field', 'controller_temp_celsius'),
+            (4, 6, 'unknown', 'not understood yet'),
+        ),
+        (0x4b, 43): (
+            (0, 4, 'field', 'subsecond_us'),
+            (4, 5, 'field', 'sequence'),
+            (5, 6, 'field', 'marker'),
+            (6, 10, 'reserved', 'constant 0x00 in all 57986 marker-free accepted entries'),
+            (10, 11, 'field', 'bms_sleep_indicator'),
+            (11, 12, 'field', 'pack_fault_flags_a'),
+            (12, 14, 'reserved', 'constant 0x00 in all 57986 marker-free accepted entries'),
+            (14, 16, 'field', 'voltage_low_cell_volts'),
+            (16, 18, 'field', 'voltage_unloaded_cell_volts'),
+            (18, 20, 'field', 'voltage_high_cell_volts'),
+            (20, 21, 'field', 'state_of_charge_percent'),
+            (21, 25, 'field', 'battery_current_amps'),
+            (25, 26, 'field', 'bms_temperature_c'),
+            (26, 30, 'unknown', 'not understood yet'),
+            (30, 31, 'field', 'pack_fault_flags_b'),
+            (31, 38, 'unknown', 'not understood yet'),
+            (38, 39, 'field', 'bms_report_mode'),
+            (39, 42, 'field', 'pack_voltage_volts'),
+            (42, 43, 'unknown', 'not understood yet'),
+        ),
+        (0x4b, 45): (
+            (0, 4, 'field', 'subsecond_us'),
+            (4, 5, 'field', 'sequence'),
+            (5, 6, 'field', 'marker'),
+            (6, 10, 'reserved', 'constant 0x00 in all 38405 marker-free accepted entries'),
+            (10, 11, 'field', 'bms_sleep_indicator'),
+            (11, 12, 'field', 'pack_fault_flags_a'),
+            (12, 14, 'reserved', 'constant 0x00 in all 38405 marker-free accepted entries'),
+            (14, 16, 'field', 'voltage_low_cell_volts'),
+            (16, 18, 'field', 'voltage_unloaded_cell_volts'),
+            (18, 20, 'field', 'voltage_high_cell_volts'),
+            (20, 21, 'field', 'state_of_charge_percent'),
+            (21, 25, 'field', 'battery_current_amps'),
+            (25, 26, 'field', 'bms_temperature_c'),
+            (26, 28, 'unknown', 'not understood yet'),
+            (28, 29, 'field', 'bms_load_flag'),
+            (29, 30, 'field', 'bms_bus_engaged'),
+            (30, 31, 'field', 'pack_fault_flags_b'),
+            (31, 38, 'reserved', 'constant 0x00 in all 38405 marker-free accepted entries'),
+            (38, 39, 'field', 'bms_report_mode'),
+            (39, 42, 'field', 'pack_voltage_volts'),
+            (42, 43, 'reserved', 'constant 0x00 in all 38405 marker-free accepted entries'),
+            (43, 45, 'unknown', 'not understood yet'),
+        ),
+        (0x4b, 46): (
+            (0, 4, 'field', 'subsecond_us'),
+            (4, 5, 'field', 'sequence'),
+            (5, 6, 'field', 'marker'),
+            (6, 7, 'unknown', 'not understood yet'),
+            (7, 10, 'reserved', 'constant 0x00 in all 5405 marker-free accepted entries'),
+            (10, 11, 'unknown', 'not understood yet'),
+            (11, 14, 'reserved', 'constant 0x00 in all 5405 marker-free accepted entries'),
+            (14, 17, 'unknown', 'not understood yet'),
+            (17, 18, 'reserved', 'constant 0x00 in all 5405 marker-free accepted entries'),
+            (18, 24, 'unknown', 'not understood yet'),
+            (24, 26, 'reserved', 'constant 0x00 in all 5405 marker-free accepted entries'),
+            (26, 30, 'unknown', 'not understood yet'),
+            (30, 31, 'reserved', 'constant 0x00 in all 5405 marker-free accepted entries'),
+            (31, 35, 'unknown', 'not understood yet'),
+            (35, 39, 'field', 'state'),
+            (39, 40, 'reserved', 'constant 0x00 in all 5405 marker-free accepted entries'),
+            (40, 45, 'unknown', 'not understood yet'),
+            (45, 46, 'reserved', 'constant 0x00 in all 5405 marker-free accepted entries'),
+        ),
+        (0x4c, 61): (
+            (0, 4, 'field', 'subsecond_us'),
+            (4, 5, 'field', 'sequence'),
+            (5, 6, 'field', 'marker'),
+            (6, 14, 'reserved', 'constant 0x00 in all 2638 marker-free accepted entries'),
+            (14, 15, 'field', 'bms_sleep_indicator'),
+            (15, 18, 'reserved', 'constant 0x00 in all 2638 marker-free accepted entries'),
+            (18, 20, 'field', 'voltage_low_cell_volts'),
+            (20, 22, 'field', 'voltage_unloaded_cell_volts'),
+            (22, 24, 'field', 'voltage_high_cell_volts'),
+            (24, 25, 'field', 'state_of_charge_percent'),
+            (25, 29, 'field', 'battery_current_amps'),
+            (29, 30, 'field', 'bms_temperature_c'),
+            (30, 35, 'unknown', 'not understood yet'),
+            (35, 42, 'reserved', 'constant 0x00 in all 2638 marker-free accepted entries'),
+            (42, 43, 'field', 'bms_report_mode'),
+            (43, 46, 'field', 'pack_voltage_volts'),
+            (46, 47, 'reserved', 'constant 0x00 in all 2638 marker-free accepted entries'),
+            (47, 48, 'field', 'cell_temperature_coldest_c'),
+            (48, 49, 'field', 'cell_temperature_hottest_c'),
+            (49, 52, 'unknown', 'not understood yet'),
+            (52, 54, 'field', 'bms_charge_current_limit_amps'),
+            (54, 61, 'unknown', 'not understood yet'),
+        ),
+        (0x4c, 63): (
+            (0, 4, 'field', 'subsecond_us'),
+            (4, 5, 'field', 'sequence'),
+            (5, 6, 'field', 'marker'),
+            (6, 14, 'reserved', 'constant 0x00 in all 2638 marker-free accepted entries'),
+            (14, 15, 'field', 'bms_sleep_indicator'),
+            (15, 18, 'reserved', 'constant 0x00 in all 2638 marker-free accepted entries'),
+            (18, 20, 'field', 'voltage_low_cell_volts'),
+            (20, 22, 'field', 'voltage_unloaded_cell_volts'),
+            (22, 24, 'field', 'voltage_high_cell_volts'),
+            (24, 25, 'field', 'state_of_charge_percent'),
+            (25, 29, 'field', 'battery_current_amps'),
+            (29, 30, 'field', 'bms_temperature_c'),
+            (30, 31, 'reserved', 'constant 0x33 in all 2638 marker-free accepted entries'),
+            (31, 32, 'unknown', 'not understood yet'),
+            (32, 33, 'field', 'bms_load_flag'),
+            (33, 34, 'field', 'bms_bus_engaged'),
+            (34, 42, 'reserved', 'constant 0x00 in all 2638 marker-free accepted entries'),
+            (42, 43, 'field', 'bms_report_mode'),
+            (43, 46, 'field', 'pack_voltage_volts'),
+            (46, 47, 'reserved', 'constant 0x00 in all 2638 marker-free accepted entries'),
+            (47, 49, 'unknown', 'not understood yet'),
+            (49, 50, 'field', 'cell_temperature_coldest_c'),
+            (50, 51, 'field', 'cell_temperature_hottest_c'),
+            (51, 54, 'unknown', 'not understood yet'),
+            (54, 56, 'field', 'bms_charge_current_limit_amps'),
+            (56, 59, 'unknown', 'not understood yet'),
+            (59, 60, 'reserved', 'constant 0x00 in all 2638 marker-free accepted entries'),
+            (60, 63, 'unknown', 'not understood yet'),
+        ),
+        (0x4c, 77): (
+            (0, 4, 'field', 'subsecond_us'),
+            (4, 5, 'field', 'sequence'),
+            (5, 6, 'field', 'marker'),
+            (6, 7, 'unknown', 'not understood yet'),
+            (7, 10, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
+            (10, 15, 'unknown', 'not understood yet'),
+            (15, 18, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
+            (18, 21, 'unknown', 'not understood yet'),
+            (21, 22, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
+            (22, 28, 'unknown', 'not understood yet'),
+            (28, 30, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
+            (30, 34, 'unknown', 'not understood yet'),
+            (34, 35, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
+            (35, 39, 'unknown', 'not understood yet'),
+            (39, 43, 'field', 'state'),
+            (43, 44, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
+            (44, 49, 'unknown', 'not understood yet'),
+            (49, 50, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
+            (50, 55, 'unknown', 'not understood yet'),
+            (55, 58, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
+            (58, 59, 'unknown', 'not understood yet'),
+            (59, 62, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
+            (62, 63, 'unknown', 'not understood yet'),
+            (63, 66, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
+            (66, 67, 'unknown', 'not understood yet'),
+            (67, 70, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
+            (70, 71, 'unknown', 'not understood yet'),
+            (71, 74, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
+            (74, 75, 'unknown', 'not understood yet'),
+            (75, 76, 'reserved', 'constant 0x01 in all 334 marker-free accepted entries'),
+            (76, 77, 'unknown', 'not understood yet'),
+        ),
+        (0x4d, 69): (
+            (0, 4, 'field', 'subsecond_us'),
+            (4, 5, 'field', 'sequence'),
+            (5, 6, 'field', 'marker'),
+            (6, 15, 'reserved', 'constant 0x00 in all 9334 marker-free accepted entries'),
+            (15, 16, 'unknown', 'not understood yet'),
+            (16, 18, 'reserved', 'constant 0x00 in all 9334 marker-free accepted entries'),
+            (18, 19, 'field', 'bms_sleep_indicator'),
+            (19, 20, 'unknown', 'not understood yet'),
+            (20, 22, 'reserved', 'constant 0x00 in all 9334 marker-free accepted entries'),
+            (22, 24, 'field', 'voltage_low_cell_volts'),
+            (24, 26, 'field', 'voltage_unloaded_cell_volts'),
+            (26, 28, 'field', 'voltage_high_cell_volts'),
+            (28, 29, 'field', 'state_of_charge_percent'),
+            (29, 33, 'field', 'battery_current_amps'),
+            (33, 34, 'field', 'bms_temperature_c'),
+            (34, 39, 'unknown', 'not understood yet'),
+            (39, 46, 'reserved', 'constant 0x00 in all 9334 marker-free accepted entries'),
+            (46, 47, 'field', 'bms_report_mode'),
+            (47, 50, 'field', 'pack_voltage_volts'),
+            (50, 51, 'reserved', 'constant 0x00 in all 9334 marker-free accepted entries'),
+            (51, 52, 'field', 'cell_temperature_coldest_c'),
+            (52, 53, 'field', 'cell_temperature_hottest_c'),
+            (53, 56, 'unknown', 'not understood yet'),
+            (56, 58, 'field', 'bms_charge_current_limit_amps'),
+            (58, 61, 'field', 'full_charge_capacity_ah'),
+            (61, 62, 'reserved', 'constant 0x00 in all 9334 marker-free accepted entries'),
+            (62, 65, 'unknown', 'not understood yet'),
+            (65, 68, 'field', 'full_charge_capacity_twin_ah'),
+            (68, 69, 'unknown', 'not understood yet'),
+        ),
+        (0x4d, 71): (
+            (0, 4, 'field', 'subsecond_us'),
+            (4, 5, 'field', 'sequence'),
+            (5, 6, 'field', 'marker'),
+            (6, 15, 'reserved', 'constant 0x00 in all 6421 marker-free accepted entries'),
+            (15, 16, 'unknown', 'not understood yet'),
+            (16, 18, 'reserved', 'constant 0x00 in all 6421 marker-free accepted entries'),
+            (18, 19, 'field', 'bms_sleep_indicator'),
+            (19, 20, 'unknown', 'not understood yet'),
+            (20, 22, 'reserved', 'constant 0x00 in all 6421 marker-free accepted entries'),
+            (22, 24, 'field', 'voltage_low_cell_volts'),
+            (24, 26, 'field', 'voltage_unloaded_cell_volts'),
+            (26, 28, 'field', 'voltage_high_cell_volts'),
+            (28, 29, 'field', 'state_of_charge_percent'),
+            (29, 33, 'field', 'battery_current_amps'),
+            (33, 34, 'field', 'bms_temperature_c'),
+            (34, 36, 'unknown', 'not understood yet'),
+            (36, 37, 'field', 'bms_load_flag'),
+            (37, 38, 'field', 'bms_bus_engaged'),
+            (38, 39, 'unknown', 'not understood yet'),
+            (39, 46, 'reserved', 'constant 0x00 in all 6421 marker-free accepted entries'),
+            (46, 47, 'field', 'bms_report_mode'),
+            (47, 50, 'field', 'pack_voltage_volts'),
+            (50, 51, 'reserved', 'constant 0x00 in all 6421 marker-free accepted entries'),
+            (51, 53, 'unknown', 'not understood yet'),
+            (53, 54, 'field', 'cell_temperature_coldest_c'),
+            (54, 55, 'field', 'cell_temperature_hottest_c'),
+            (55, 58, 'unknown', 'not understood yet'),
+            (58, 60, 'field', 'bms_charge_current_limit_amps'),
+            (60, 63, 'field', 'full_charge_capacity_ah'),
+            (63, 64, 'reserved', 'constant 0x00 in all 6421 marker-free accepted entries'),
+            (64, 67, 'unknown', 'not understood yet'),
+            (67, 70, 'field', 'full_charge_capacity_twin_ah'),
+            (70, 71, 'unknown', 'not understood yet'),
+        ),
+        (0x4d, 89): (
+            (0, 4, 'field', 'subsecond_us'),
+            (4, 5, 'field', 'sequence'),
+            (5, 6, 'field', 'marker'),
+            (6, 7, 'unknown', 'not understood yet'),
+            (7, 10, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
+            (10, 19, 'unknown', 'not understood yet'),
+            (19, 22, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
+            (22, 25, 'unknown', 'not understood yet'),
+            (25, 26, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
+            (26, 32, 'unknown', 'not understood yet'),
+            (32, 34, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
+            (34, 37, 'unknown', 'not understood yet'),
+            (37, 38, 'reserved', 'constant 0x01 in all 304 marker-free accepted entries'),
+            (38, 39, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
+            (39, 43, 'unknown', 'not understood yet'),
+            (43, 47, 'field', 'state'),
+            (47, 48, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
+            (48, 53, 'unknown', 'not understood yet'),
+            (53, 54, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
+            (54, 59, 'unknown', 'not understood yet'),
+            (59, 62, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
+            (62, 63, 'unknown', 'not understood yet'),
+            (63, 66, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
+            (66, 67, 'unknown', 'not understood yet'),
+            (67, 70, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
+            (70, 71, 'unknown', 'not understood yet'),
+            (71, 74, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
+            (74, 75, 'unknown', 'not understood yet'),
+            (75, 78, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
+            (78, 80, 'reserved', 'constant 0x01 in all 304 marker-free accepted entries'),
+            (80, 81, 'unknown', 'not understood yet'),
+            (81, 89, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
+        ),
+        (0x4e, 58): (
+            (0, 4, 'field', 'subsecond_us'),
+            (4, 5, 'field', 'sequence'),
+            (5, 6, 'field', 'marker'),
+            (6, 10, 'unknown', 'not understood yet (too few entries to test)'),
+            (10, 31, 'field', 'build_date'),
+            (31, 52, 'unknown', 'not understood yet (too few entries to test)'),
+            (52, 58, 'field', 'flash_bank'),
+        ),
+        (0x4e, 60): (
+            (0, 4, 'field', 'subsecond_us'),
+            (4, 5, 'field', 'sequence'),
+            (5, 6, 'field', 'marker'),
+            (6, 10, 'unknown', 'not understood yet (too few entries to test)'),
+            (10, 31, 'field', 'build_date'),
+            (31, 44, 'unknown', 'not understood yet (too few entries to test)'),
+            (44, 50, 'field', 'flash_bank'),
+            (50, 58, 'field', 'build_number'),
+            (58, 60, 'unknown', 'not understood yet (too few entries to test)'),
+        ),
+        (0x54, 22): (
+            (0, 4, 'field', 'odometer_meters'),
+            (4, 8, 'field', 'sensor_1_value'),
+            (8, 12, 'field', 'sensor_2_value'),
+            (12, 16, 'field', 'sensor_3_value'),
+            (16, 20, 'field', 'sensor_4_value'),
+            (20, 22, 'field', 'status_flags'),
+        ),
+    }
+
+    # 0x48: one 49-byte charger record (offsets within the record)
+    CHARGER_RECORD_LAYOUT = (
+        (0, 10, 'field', 'chargers.name'),
+        (10, 12, 'field', 'chargers.flags'),
+        (12, 15, 'unknown', 'not understood yet'),
+        (15, 16, 'reserved', 'constant 0x00 in all 11068 marker-free accepted charger records'),
+        (16, 22, 'unknown', 'not understood yet'),
+        (22, 23, 'reserved', 'constant 0x01 in all 11068 marker-free accepted charger records'),
+        (23, 24, 'reserved', 'constant 0x00 in all 11068 marker-free accepted charger records'),
+        (24, 29, 'unknown', 'not understood yet'),
+        (29, 30, 'field', 'chargers.hertz'),
+        (30, 31, 'unknown', 'not understood yet'),
+        (31, 32, 'field', 'chargers.id'),
+        (32, 34, 'field', 'chargers.version'),
+        (34, 38, 'field', 'chargers.serial_number'),
+        (38, 39, 'unknown', 'not understood yet'),
+        (39, 40, 'reserved', 'constant 0x00 in all 11068 marker-free accepted charger records'),
+        (40, 43, 'unknown', 'not understood yet'),
+        (43, 44, 'reserved', 'constant 0x00 in all 11068 marker-free accepted charger records'),
+        (44, 47, 'unknown', 'not understood yet'),
+        (47, 48, 'reserved', 'constant 0x00 in all 11068 marker-free accepted charger records'),
+        (48, 49, 'unknown', 'not understood yet'),
+    )
+
+    @classmethod
+    def _segments(cls, kinds, labels):
+        """Run-length encode per-offset (kind, label) into segments."""
+        out = []
+        for i, kl in enumerate(zip(kinds, labels)):
+            if out and out[-1][2] == kl[0] and out[-1][3] == kl[1]:
+                out[-1] = (out[-1][0], i + 1, kl[0], kl[1])
+            else:
+                out.append((i, i + 1, kl[0], kl[1]))
+        return tuple(out)
+
+    @classmethod
+    def payload_layout(cls, message_type, length):
+        """Declared byte layout of a raw_hex-keeping decoder for one payload
+        length, or None (see the block comment above)."""
+        key = (message_type, length)
+        cache = cls.__dict__.get('_PAYLOAD_LAYOUT_CACHE')
+        if cache is None:
+            cache = {}
+            cls._PAYLOAD_LAYOUT_CACHE = cache
+        if key in cache:
+            return cache[key]
+        layout = None
+        if message_type in (0x51, 0x52, 0x53):
+            layout = cls._telemetry_layout(message_type, length)
+        elif message_type == 0x48 and length >= cls.CHARGER_RECORD_OFFSET + cls.CHARGER_RECORD_LEN \
+                and (length - cls.CHARGER_RECORD_OFFSET) % cls.CHARGER_RECORD_LEN == 0:
+            layout = cls._charger_layout(length)
+        elif key in cls.PAYLOAD_LAYOUT_TABLE:
+            layout = cls.PAYLOAD_LAYOUT_TABLE[key]
+        cache[key] = layout
+        return layout
+
+    @classmethod
+    def _telemetry_layout(cls, message_type, length):
+        if message_type == 0x51:
+            if length not in cls.VEHICLE_STATE_TELEMETRY_LENGTHS:
+                return None
+            tag = 35
+        else:
+            tier, lengths, tag = cls.TELEMETRY_TIERS[message_type]
+            if length not in lengths:
+                return None
+        kinds = [cls.LAYOUT_UNKNOWN] * length
+        labels = ['not understood yet'] * length
+        def paint(start, width, name):
+            for i in range(start, start + width):
+                if 0 <= i < length:
+                    kinds[i] = cls.LAYOUT_FIELD
+                    labels[i] = name
+        for start, width, name in cls.TELEMETRY_LAYOUT_PREFIX:
+            paint(start, width, name)
+        for rel, width, name in cls.TELEMETRY_LAYOUT_REL:
+            paint(tag + rel, width, name)
+        for field, offset in cls.TELEMETRY_TAIL_FIELDS.get((message_type, length), {}).items():
+            width, name = cls.TELEMETRY_TAIL_WIDTHS[field]
+            paint(tag + offset, width, name)
+        for offset, evidence in cls.TELEMETRY_RESERVED_BYTES.get((message_type, length), {}).items():
+            if kinds[offset] == cls.LAYOUT_UNKNOWN:
+                kinds[offset] = cls.LAYOUT_RESERVED
+                labels[offset] = evidence
+        return cls._segments(kinds, labels)
+
+    @classmethod
+    def _charger_layout(cls, length):
+        """0x48: the 6-byte prefix, then one 49-byte record per charger."""
+        kinds, labels = [], []
+        for name in ('subsecond_us', 'subsecond_us', 'subsecond_us', 'subsecond_us', 'sequence', 'marker'):
+            kinds.append(cls.LAYOUT_FIELD)
+            labels.append(name)
+        for _ in range((length - cls.CHARGER_RECORD_OFFSET) // cls.CHARGER_RECORD_LEN):
+            for start, stop, kind, label in cls.CHARGER_RECORD_LAYOUT:
+                kinds += [kind] * (stop - start)
+                labels += [label] * (stop - start)
+        return cls._segments(kinds, labels)
+
+
     @classmethod
     def telemetry_pack_fields(cls, x, tag_offset):
         """SOC, pack voltage and battery current for types 0x51 / 0x52 / 0x53
@@ -2830,9 +3295,18 @@ class Gen2:
         pack_warm_t = BinaryTools.unpack('uint8', x, tag_offset + 21)
         pack_cold_t = BinaryTools.unpack('uint8', x, tag_offset + 25)
 
+        # tag+5 is a second copy of the tag-25 validity byte (0x51 payload 40,
+        # 0x52 payload 44, 0x53 payload 48), analysis/gen3_page_claims.md
+        # Phase 3 Part 2b: its controller bits match "DC bus voltage reads
+        # zero" exactly, its BMS bits miss 434 entries that tag-25 flags, so
+        # tag-25 stays authoritative and nothing is derived from this copy.
+        # Exposed as a raw integer; its meaning is otherwise unresolved.
+        flags_copy = BinaryTools.unpack('uint8', x, tag_offset + 5)
+
         data = {
             'motor_controller_data_valid': controller_ok,
             'bms_data_valid': bms_ok,
+            'validity_flags_copy': flags_copy,
             'dc_bus_voltage_volts': ctl(dc_bus_mv / 1000.0),
             'dc_bus_current_amps': ctl(dc_bus_ma / 1000.0),
             'motor_rpm': ctl(rpm),
@@ -3378,7 +3852,7 @@ class Gen2:
         controller temp C. The firmware renderer never reads bytes 4-5, so
         they are not identified and stay in raw_hex with the rest of the
         payload."""
-        if len(x) != 6:
+        if len(x) != cls.HIGH_MOTOR_CONTROLLER_TEMP_LENGTH:
             return cls.unhandled_entry_format(0x26, x)
         motor_temp = BinaryTools.unpack('uint16', x, 0x00)
         controller_temp = BinaryTools.unpack('uint16', x, 0x02)
@@ -3472,7 +3946,7 @@ class Gen2:
         with the length gates in state_snapshot/vehicle_state_telemetry_tier,
         and with how little those stray lengths agree with any real shape.
         """
-        if len(x) not in (64, 68):
+        if len(x) not in cls.VEHICLE_STATE_TELEMETRY_LENGTHS:
             return cls.unhandled_entry_format(0x51, x)
 
         tag_bytes = bytes(x[35:39])
