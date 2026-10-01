@@ -90,7 +90,7 @@ def test_long_variants_carry_dc_dc_voltage_and_the_full_tail():
     for message_type, length in ((0x52, 85), (0x53, 99)):
         sd = _decode(message_type, _payload(message_type, length))['structured_data']
         assert sd['dc_dc_bus_voltage_volts'] == 13.101776
-        assert sd['distance_counter_raw'] == 62684
+        assert sd['distance_km'] == 6268.4
         assert sd['speed_raw'] == 3942
         assert sd['range_estimate_raw'] == 8069
 
@@ -98,7 +98,7 @@ def test_long_variants_carry_dc_dc_voltage_and_the_full_tail():
 def test_0x51_long_variant_carries_only_the_dc_dc_voltage():
     sd = _decode(0x51, _payload(0x51, 68))['structured_data']
     assert sd['dc_dc_bus_voltage_volts'] == 13.101776
-    for key in ('distance_counter_raw', 'speed_raw', 'range_estimate_raw'):
+    for key in ('distance_km', 'speed_raw', 'range_estimate_raw'):
         assert key not in sd
 
 
@@ -106,17 +106,17 @@ def test_short_variants_read_the_tail_four_bytes_earlier_and_have_no_dc_dc_volta
     for message_type, length in ((0x52, 81), (0x53, 95)):
         sd = _decode(message_type, _payload(message_type, length))['structured_data']
         assert 'dc_dc_bus_voltage_volts' not in sd
-        assert sd['distance_counter_raw'] == 62684
+        assert sd['distance_km'] == 6268.4
         assert sd['speed_raw'] == 3942
         assert sd['range_estimate_raw'] == 8069
 
 
 def test_variants_without_a_mapped_tail_carry_no_tail_fields():
     sd = _decode(0x51, _payload(0x51, 64))['structured_data']
-    for key in ('dc_dc_bus_voltage_volts', 'distance_counter_raw', 'speed_raw', 'range_estimate_raw'):
+    for key in ('dc_dc_bus_voltage_volts', 'distance_km', 'speed_raw', 'range_estimate_raw'):
         assert key not in sd
     sd = _decode(0x53, _payload(0x53, 93))['structured_data']
-    for key in ('dc_dc_bus_voltage_volts', 'distance_counter_raw', 'speed_raw', 'range_estimate_raw'):
+    for key in ('dc_dc_bus_voltage_volts', 'distance_km', 'speed_raw', 'range_estimate_raw'):
         assert key not in sd
 
 
@@ -178,7 +178,7 @@ def test_zero_rpm_with_a_valid_controller_group_stays_zero_not_none():
 def test_conditions_strings_carry_the_new_fields():
     cond = _decode(0x52, _payload(0x52, 85))['conditions']
     for text in ('Vdc:105.3V', 'Idc:30.2A', 'RPM:2932', 'Tamb:12.50C', 'Tdrive1:42C', 'Tdrive2:19C',
-                 'Tpack:16/15C', 'Vdcdc:13.10V', 'Counter(raw):62684', 'Speed(raw):3942',
+                 'Tpack:16/15C', 'Vdcdc:13.10V', 'Odo:6268.4km', 'Speed(raw):3942',
                  'Range(raw):8069', 'Valid(ctrl/bms):1/1'):
         assert text in cond
     cond = _decode(0x51, _payload(0x51, 64, flags=0x0a))['conditions']

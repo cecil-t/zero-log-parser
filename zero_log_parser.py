@@ -2331,15 +2331,21 @@ class Gen2:
     # short variants lack are the DC-DC voltage and its pad, so every later
     # field sits 4 bytes earlier in them:
     #   +29 u24 LE, uV - DC-DC (12 V auxiliary) bus voltage, long variants only
-    #   +35/+31 u24 LE - cumulative counter, never decreases, advances only
-    #       while RUN; fitted 5.15e-5 counter units per (speed_raw x second)
-    #       (per model 5.03e-5 to 5.40e-5), i.e. about 19,400 speed_raw-seconds
-    #       per unit. Its physical unit is NOT resolved.
+    #   +35/+31 u24 LE - cumulative distance counter, never decreases,
+    #       advances only while RUN; distance_km = counter x 0.1 km (the unit
+    #       is a decision, see TELEMETRY_DISTANCE_KM_PER_UNIT). Fitted 5.15e-5
+    #       counter units per (speed_raw x second) (per model 5.03e-5 to
+    #       5.40e-5), about 19,400 speed_raw-seconds per unit.
     #   +39/+35 u32 LE - always an exact multiple of 18750; value / 18750 is
     #       speed_raw, proportional to motor_rpm with a per-model constant
     #       (1.345 SR/SRS/SRF, 1.415 DSR/X, 1.286 DS). Unit NOT resolved: the
     #       interval 0.0105-0.0113 mph per unit satisfies the constraints
-    #       tested (see the analysis file) but no round unit sits in it.
+    #       tested (see the analysis file) but no round unit sits in it. With
+    #       the distance fixed at 0.1 km per unit, true speed per speed_raw
+    #       unit is 0.01842 km/h (95% CI 0.01828-0.01856) but differs by model
+    #       family (DSR/DS about 5% above SR), and nothing here shows a
+    #       displayed speed, so any speedometer offset is not determinable;
+    #       speed_raw therefore stays a neutral value.
     #   +43/+39 u16 LE - range_estimate_raw, evidence favours an estimated
     #       remaining range in hundredths of a distance unit; not confirmed.
     # message_type, payload length -> {field: tag-relative offset}
@@ -2360,6 +2366,11 @@ class Gen2:
     TELEMETRY_CONTROLLER_FLAG_MASK = 0x1E
     TELEMETRY_BMS_FLAG_MASK = 0xE0
     TELEMETRY_SPEED_STEP = 18750
+    # Distance counter unit: 0.1 km. Chosen by the project owner; the data are
+    # consistent with it but do not pin it down independently (fitted 0.096 km
+    # per unit from 0.0599 mi, within the +-4% per-model spread; see analysis/
+    # gen3_page_claims.md, Phase 3 Part 1 and Phase 4 Item 3).
+    TELEMETRY_DISTANCE_KM_PER_UNIT = 0.1
 
     @classmethod
     def telemetry_pack_fields(cls, x, tag_offset):
@@ -2438,8 +2449,8 @@ class Gen2:
         if 'counter' in tail:
             at = tag_offset + tail['counter']
             counter = int.from_bytes(bytes(x[at:at + 3]), 'little')
-            data['distance_counter_raw'] = counter
-            conditions += f", Counter(raw):{counter}"
+            data['distance_km'] = round(counter * cls.TELEMETRY_DISTANCE_KM_PER_UNIT, 1)
+            conditions += f", Odo:{data['distance_km']:.1f}km"
         if 'speed' in tail:
             value = BinaryTools.unpack('uint32', x, tag_offset + tail['speed'])
             speed = value // cls.TELEMETRY_SPEED_STEP if value % cls.TELEMETRY_SPEED_STEP == 0 else None
