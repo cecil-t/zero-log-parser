@@ -141,7 +141,7 @@ A legacy entry's raw 32-bit timestamp is seconds since power-on when it is below
 | `clock` | Raw value is a wall-clock epoch. `timestamp`/`sort_timestamp` are that time |
 | `backfilled` | Raw value is uptime, and the same power cycle later reaches a wall-clock time T. The time is T minus (the last uptime before T minus this entry's uptime), accurate to about a second |
 | `uptime` | Raw value is uptime and the cycle never gets a date. No time of day is invented: `timestamp` and `sort_timestamp` are `null`, `uptime_s` holds the value, and the text output shows `+H:MM:SS` |
-| `invalid` | Raw value is a wall-clock epoch after 2030-12-31, which is corrupt rather than a date. `timestamp` shows the value as decoded, `sort_timestamp` is `null` |
+| `invalid` | Raw value is a wall-clock epoch later than the end of the UTC date one year after the day the log is parsed (a rolling limit, so it moves with the calendar), which is corrupt rather than a date. `timestamp` shows the value as decoded, `sort_timestamp` is `null`. The lower bound for wall-clock values stays at 2010-01-01 UTC |
 | `null` | The entry has no raw timestamp (corrupted or recovered entry) |
 
 Newest entries come first. Entries with a real time sort by time. Entries without a time of day keep their log position: they sit just after the nearest earlier dated entry, in reverse log order; a log with no dates at all comes out in reverse log order. Text output of such a log starts with the note "This log has no dates or times of day. Times are shown as time since the bike was switched on."
