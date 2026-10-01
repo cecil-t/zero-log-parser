@@ -36,6 +36,7 @@ def _payload(message_type, length, tag=b'RUN\x00', subsecond=76000, prefix=0x02e
     struct.pack_into('<I', buf, 0, subsecond)
     struct.pack_into('<H', buf, 4, prefix)
     buf[offset:offset + len(tag)] = tag
+    buf[offset - 25] = 0    # validity flag byte: both groups valid
     return buf
 
 
@@ -155,9 +156,22 @@ def test_battery_current_is_signed():
         assert 'I:-13.000A' in out['conditions']
 
 
-def test_zero_voltage_and_current_in_hib_are_exposed_raw():
+def test_zero_voltage_and_current_in_hib_are_none_when_the_bms_flag_is_set():
     for message_type, (_, lengths, tag_offset) in TIERS.items():
         payload = _payload(message_type, lengths[0], _tag('HIB'))
+        payload[tag_offset - 25] = 0x60
+        _set_triple(payload, tag_offset, 71, 0, 0)
+        out = Gen2.vehicle_state_telemetry_tier(message_type, payload)
+        sd = out['structured_data']
+        assert sd['pack_voltage_volts'] is None and sd['battery_current_amps'] is None
+        assert sd['state_of_charge_percent'] == 71
+        assert 'Vpack:n/aV' in out['conditions']
+
+
+def test_zero_voltage_with_the_bms_flag_clear_stays_a_raw_zero():
+    for message_type, (_, lengths, tag_offset) in TIERS.items():
+        payload = _payload(message_type, lengths[0], _tag('RUN'))
+        payload[tag_offset - 25] = 0
         _set_triple(payload, tag_offset, 71, 0, 0)
         sd = Gen2.vehicle_state_telemetry_tier(message_type, payload)['structured_data']
         assert sd['pack_voltage_volts'] == 0.0 and sd['battery_current_amps'] == 0.0

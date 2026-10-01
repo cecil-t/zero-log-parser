@@ -37,6 +37,7 @@ def _payload(length=64, tag=b'RUN\x00', subsecond=76000, sequence=0x30, marker=0
         buf[5] = marker
     if length >= 39:
         buf[35:39] = tag
+        buf[10] = 0         # validity flag byte: both groups valid
     for offset, value in zip((48, 52, 56, 60), temps):
         if offset < length:
             buf[offset] = value & 0xff
@@ -164,8 +165,18 @@ def test_current_is_signed_and_68_byte_variant_decodes():
     assert sd['battery_current_amps'] == -13.0
 
 
-def test_hibernate_zero_fields_are_exposed_raw():
+def test_hibernate_zero_fields_are_none_when_the_bms_flag_is_set():
     payload = _payload(64, _tag('HIB'))
+    payload[10] = 0x60      # BMS validity group set: the BMS is not reporting
+    struct.pack_into('<I', payload, 27, 0)
+    struct.pack_into('<i', payload, 31, 0)
+    sd = Gen2.vehicle_state_telemetry(payload)['structured_data']
+    assert sd['pack_voltage_volts'] is None and sd['battery_current_amps'] is None
+
+
+def test_zero_voltage_with_the_bms_flag_clear_stays_a_raw_zero():
+    payload = _payload(64, _tag('RUN'))
+    payload[10] = 0         # BMS validity flag clear: report what was read
     struct.pack_into('<I', payload, 27, 0)
     struct.pack_into('<i', payload, 31, 0)
     sd = Gen2.vehicle_state_telemetry(payload)['structured_data']

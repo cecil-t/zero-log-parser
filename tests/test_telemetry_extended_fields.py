@@ -74,8 +74,8 @@ def test_pre_tag_and_temperature_fields_decode_on_every_variant():
         assert sd['dc_bus_current_amps'] == 30.2
         assert sd['motor_rpm'] == 2932
         assert sd['ambient_temperature_c'] == 12.5
-        assert sd['motor_temperature_c'] == 42
-        assert sd['controller_temperature_c'] == 19
+        assert sd['drive_temperature_1_c'] == 42
+        assert sd['drive_temperature_2_c'] == 19
         assert sd['pack_temperature_warmest_c'] == 16
         assert sd['pack_temperature_coldest_c'] == 15
 
@@ -127,20 +127,33 @@ def test_controller_flag_turns_controller_side_fields_into_none():
         assert sd['motor_controller_data_valid'] is False
         assert sd['bms_data_valid'] is True
         for key in ('dc_bus_voltage_volts', 'dc_bus_current_amps', 'motor_rpm',
-                    'motor_temperature_c', 'controller_temperature_c', 'speed_raw'):
+                    'drive_temperature_1_c', 'drive_temperature_2_c', 'speed_raw'):
             assert sd[key] is None
         # the pack-side temperatures and the ambient temperature are not in this group
         assert sd['pack_temperature_warmest_c'] == 16
         assert sd['ambient_temperature_c'] == 12.5
 
 
-def test_bms_flag_sets_its_validity_indicator_but_leaves_shipped_pack_fields_alone():
-    for flags in (0x60, 0xc0, 0xe0):
-        sd = _decode(0x51, _payload(0x51, 64, flags=flags))['structured_data']
-        assert sd['bms_data_valid'] is False
-        assert sd['motor_controller_data_valid'] is True
-        assert sd['pack_voltage_volts'] == 105.144        # unchanged shipped behaviour
-        assert sd['battery_current_amps'] == 12.273
+def test_bms_flag_makes_pack_voltage_and_current_none_but_not_soc_or_other_groups():
+    for message_type, length in ((0x51, 64), (0x51, 68), (0x52, 81), (0x52, 85), (0x53, 95), (0x53, 99)):
+        for flags in (0x60, 0xc0, 0xe0):
+            out = _decode(message_type, _payload(message_type, length, flags=flags))
+            sd = out['structured_data']
+            assert sd['bms_data_valid'] is False
+            assert sd['motor_controller_data_valid'] is True
+            assert sd['pack_voltage_volts'] is None
+            assert sd['battery_current_amps'] is None
+            assert sd['state_of_charge_percent'] == 64
+            assert sd['pack_temperature_warmest_c'] == 16
+            assert 'Vpack:n/aV' in out['conditions'] and 'I:n/aA' in out['conditions']
+
+
+def test_pack_voltage_and_current_decode_when_bms_flag_is_clear():
+    for message_type, length in ((0x51, 64), (0x52, 85), (0x53, 99)):
+        for flags in (0, 0x0a, 0x14):       # controller-group bits do not affect the pack fields
+            sd = _decode(message_type, _payload(message_type, length, flags=flags))['structured_data']
+            assert sd['pack_voltage_volts'] == 105.144
+            assert sd['battery_current_amps'] == 12.273
 
 
 def test_both_flags_set_together_and_neither():
@@ -164,7 +177,7 @@ def test_zero_rpm_with_a_valid_controller_group_stays_zero_not_none():
 
 def test_conditions_strings_carry_the_new_fields():
     cond = _decode(0x52, _payload(0x52, 85))['conditions']
-    for text in ('Vdc:105.3V', 'Idc:30.2A', 'RPM:2932', 'Tamb:12.50C', 'Tmotor:42C', 'Tctrl:19C',
+    for text in ('Vdc:105.3V', 'Idc:30.2A', 'RPM:2932', 'Tamb:12.50C', 'Tdrive1:42C', 'Tdrive2:19C',
                  'Tpack:16/15C', 'Vdcdc:13.10V', 'Counter(raw):62684', 'Speed(raw):3942',
                  'Range(raw):8069', 'Valid(ctrl/bms):1/1'):
         assert text in cond

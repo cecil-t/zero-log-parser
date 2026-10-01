@@ -2317,7 +2317,15 @@ class Gen2:
     #   tag-17  i32 LE, mA, 0.1 A steps - DC bus current
     #   tag-13  u16 LE - motor RPM
     #   tag+9   i16 LE, 0.01 C - ambient temperature
-    #   tag+13/17/21/25  u8, C - motor, controller, pack warmest, pack coldest
+    #   tag+13/17/21/25  u8, C - drive temperature 1, drive temperature 2,
+    #       pack warmest, pack coldest. The two drive temperatures are named
+    #       by position, not by what they measure: tag+13 correlates more
+    #       with load than tag+17 in 11 of 11 models and is hotter in 82% of
+    #       entries overall, which suggests motor and controller, but it is
+    #       NOT hotter in the DSR family (0% of DSR, about 50% of DS) or in
+    #       S_AUS, so the identity is not established (analysis/
+    #       gen3_page_claims.md, Phase 3 Part 2). Both belong to the
+    #       controller validity group (zero exactly when that flag is set).
     # The tail after the temperatures is present only in some variants; the
     # offsets below are tag-relative and the four bytes of the tail that the
     # short variants lack are the DC-DC voltage and its pad, so every later
@@ -2354,6 +2362,28 @@ class Gen2:
     TELEMETRY_SPEED_STEP = 18750
 
     @classmethod
+    def telemetry_pack_fields(cls, x, tag_offset):
+        """SOC, pack voltage and battery current for types 0x51 / 0x52 / 0x53
+        (u8 at tag-9, u32 LE mV at tag-8, i32 LE mA at tag-4). Pack voltage
+        and battery current are None when the BMS validity group (flag byte at
+        tag-25, mask TELEMETRY_BMS_FLAG_MASK) says the BMS is not reporting:
+        in every such entry both read zero, so the zero is a marker, not a
+        measurement (analysis/gen3_page_claims.md, Phase 3 Part 2b; 43,356 of
+        82,840 entries). Before this change that zero was exposed raw. SOC is
+        not in the group and is always reported. Returns (soc, volts, amps,
+        conditions fragment)."""
+        soc = BinaryTools.unpack('uint8', x, tag_offset - 9)
+        flags = BinaryTools.unpack('uint8', x, tag_offset - 25)
+        if flags & cls.TELEMETRY_BMS_FLAG_MASK:
+            volts = amps = None
+        else:
+            volts = BinaryTools.unpack('uint32', x, tag_offset - 8) / 1000.0
+            amps = BinaryTools.unpack('int32', x, tag_offset - 4) / 1000.0
+        v_text = 'n/a' if volts is None else f'{volts:.3f}'
+        i_text = 'n/a' if amps is None else f'{amps:.3f}'
+        return soc, volts, amps, f'SOC:{soc}%, Vpack:{v_text}V, I:{i_text}A'
+
+    @classmethod
     def telemetry_extended_fields(cls, message_type, x, tag_offset):
         """Decode the DC bus, RPM, temperature, validity and tail fields that
         types 0x51 / 0x52 / 0x53 share. Returns (structured_data updates,
@@ -2370,8 +2400,8 @@ class Gen2:
         dc_bus_ma = BinaryTools.unpack('int32', x, tag_offset - 17)
         rpm = BinaryTools.unpack('uint16', x, tag_offset - 13)
         ambient = BinaryTools.unpack('int16', x, tag_offset + 9) / 100.0
-        motor_t = BinaryTools.unpack('uint8', x, tag_offset + 13)
-        controller_t = BinaryTools.unpack('uint8', x, tag_offset + 17)
+        drive_t1 = BinaryTools.unpack('uint8', x, tag_offset + 13)
+        drive_t2 = BinaryTools.unpack('uint8', x, tag_offset + 17)
         pack_warm_t = BinaryTools.unpack('uint8', x, tag_offset + 21)
         pack_cold_t = BinaryTools.unpack('uint8', x, tag_offset + 25)
 
@@ -2382,8 +2412,8 @@ class Gen2:
             'dc_bus_current_amps': ctl(dc_bus_ma / 1000.0),
             'motor_rpm': ctl(rpm),
             'ambient_temperature_c': ambient,
-            'motor_temperature_c': ctl(motor_t),
-            'controller_temperature_c': ctl(controller_t),
+            'drive_temperature_1_c': ctl(drive_t1),
+            'drive_temperature_2_c': ctl(drive_t2),
             'pack_temperature_warmest_c': pack_warm_t,
             'pack_temperature_coldest_c': pack_cold_t,
         }
@@ -2395,8 +2425,8 @@ class Gen2:
             f"Vdc:{fmt(data['dc_bus_voltage_volts'], '.1f')}V, "
             f"Idc:{fmt(data['dc_bus_current_amps'], '.1f')}A, "
             f"RPM:{fmt(data['motor_rpm'])}, Tamb:{ambient:.2f}C, "
-            f"Tmotor:{fmt(data['motor_temperature_c'])}C, "
-            f"Tctrl:{fmt(data['controller_temperature_c'])}C, "
+            f"Tdrive1:{fmt(data['drive_temperature_1_c'])}C, "
+            f"Tdrive2:{fmt(data['drive_temperature_2_c'])}C, "
             f"Tpack:{pack_warm_t}/{pack_cold_t}C"
         )
 
@@ -2451,8 +2481,8 @@ class Gen2:
         addendum): u8 at tag-9, u32 LE mV at tag-8, i32 LE mA at tag-4,
         addressed relative to the tag so every length variant of both
         tiers reads the same way. Every other byte is unidentified and kept
-        in raw_hex. Voltage and current are exposed raw even when zero
-        (HIB). A payload whose
+        in raw_hex. Voltage and current are None when the BMS validity flag
+        says the BMS is not reporting (telemetry_pack_fields). A payload whose
         length is not one of the accepted variants, or whose tag is not one
         of the known state names, falls back to the raw-hex report
         unhandled_entry_format() already gives these types.
@@ -2470,9 +2500,7 @@ class Gen2:
         if prefix['subsecond_us'] > cls.FST_SUBSECOND_MAX_US:
             return cls.unhandled_entry_format(message_type, x)
 
-        soc = BinaryTools.unpack('uint8', x, tag_offset - 9)
-        pack_voltage_mv = BinaryTools.unpack('uint32', x, tag_offset - 8)
-        current_ma = BinaryTools.unpack('int32', x, tag_offset - 4)
+        soc, pack_volts, pack_amps, pack_conditions = cls.telemetry_pack_fields(x, tag_offset)
 
         structured_data = {
             'telemetry_tier': tier,
@@ -2480,19 +2508,15 @@ class Gen2:
         }
         structured_data.update(prefix)
         structured_data['state_of_charge_percent'] = soc
-        structured_data['pack_voltage_volts'] = pack_voltage_mv / 1000.0
-        structured_data['battery_current_amps'] = current_ma / 1000.0
+        structured_data['pack_voltage_volts'] = pack_volts
+        structured_data['battery_current_amps'] = pack_amps
         extended, extended_conditions = cls.telemetry_extended_fields(message_type, x, tag_offset)
         structured_data.update(extended)
         structured_data['raw_hex'] = bytes(x).hex()
 
         return {
             'event': 'Vehicle State Telemetry',
-            'conditions': (
-                f'State: {state}, tier: {tier}, SOC:{soc}%, '
-                f'Vpack:{pack_voltage_mv / 1000.0:.3f}V, '
-                f'I:{current_ma / 1000.0:.3f}A, {extended_conditions}'
-            ),
+            'conditions': f'State: {state}, tier: {tier}, {pack_conditions}, {extended_conditions}',
             'structured_data': structured_data
         }
 
@@ -3001,7 +3025,9 @@ class Gen2:
         state tag at 35. Confirmed at corpus scale: voltage 79.9-117.6 V,
         SOC/voltage correlation 0.98 per VIN, charging current negative.
         In HIB the voltage and current fields are almost always zero
-        (98.3% / 98.4%), so they are exposed raw, not as a measurement.
+        (98.3% / 98.4%). They are None, not zero, when the BMS validity flag
+        at tag-25 says the BMS is not reporting (telemetry_pack_fields);
+        until that flag was found they were exposed as a raw 0.0.
 
         Kept, corrected: temperature_1..4_celsius are real (see
         vst_field_fix.md's per-VIN smoothness, physical-range and seasonal
@@ -3033,9 +3059,7 @@ class Gen2:
         if prefix['subsecond_us'] > cls.FST_SUBSECOND_MAX_US:
             return cls.unhandled_entry_format(0x51, x)
 
-        soc = BinaryTools.unpack('uint8', x, 26)
-        pack_voltage_mv = BinaryTools.unpack('uint32', x, 27)
-        current_ma = BinaryTools.unpack('int32', x, 31)
+        soc, pack_volts, pack_amps, pack_conditions = cls.telemetry_pack_fields(x, 35)
 
         temp1 = BinaryTools.unpack('uint8', x, 48)
         temp2 = BinaryTools.unpack('uint8', x, 52)
@@ -3049,16 +3073,15 @@ class Gen2:
         structured_data['temperature_3_celsius'] = temp3
         structured_data['temperature_4_celsius'] = temp4
         structured_data['state_of_charge_percent'] = soc
-        structured_data['pack_voltage_volts'] = pack_voltage_mv / 1000.0
-        structured_data['battery_current_amps'] = current_ma / 1000.0
+        structured_data['pack_voltage_volts'] = pack_volts
+        structured_data['battery_current_amps'] = pack_amps
         extended, extended_conditions = cls.telemetry_extended_fields(0x51, x, 35)
         structured_data.update(extended)
         structured_data['raw_hex'] = bytes(x).hex()
 
         conditions = (
             f"State: {state}, "
-            f"SOC:{soc}%, Vpack:{pack_voltage_mv / 1000.0:.3f}V, "
-            f"I:{current_ma / 1000.0:.3f}A, "
+            f"{pack_conditions}, "
             f"Temp1: {temp1}°C, Temp2: {temp2}°C, "
             f"Temp3: {temp3}°C, Temp4: {temp4}°C, "
             f"{extended_conditions}"
