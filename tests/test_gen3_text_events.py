@@ -89,15 +89,83 @@ def test_classic_text_entries_without_a_prefix_are_not_touched():
     assert Gen2.gen3_text_event(bytearray(b'SOC:1,2,3\x00')) is None
 
 
-def test_event_text_is_left_exactly_as_before():
+def _raw_entry(payload, message_type=0xfd, timestamp=1_700_000_000):
+    body = bytes([message_type]) + struct.pack('<I', timestamp) + bytes(payload)
+    return bytearray([0xb2, len(body) + 2]) + bytearray(body)
+
+
+def _parse(payload, gen3_text):
+    import logging
+    raw = _raw_entry(payload)
+    length, entry, _ = Gen2.parse_entry(raw, 0, 0, logging.getLogger('t'), gen3_text=gen3_text)
+    assert length == len(raw)
+    return entry
+
+
+def test_gen3_mbb_and_bms_text_entries_render_the_real_message():
+    for marker_byte in (0x02, 0x01):            # MBB / BMS prefix marker values
+        payload = _gen3('Saving Stats, Hibernating for 3600 sec')
+        payload[5] = marker_byte
+        entry = _parse(payload, gen3_text=True)
+        assert entry['event'] == 'Saving Stats, Hibernating for 3600 sec'
+        assert entry['structured_data']['hibernate_seconds'] == 3600
+    entry = _parse(_gen3('Kill Sw = STOP'), gen3_text=True)
+    assert entry['event'] == 'Kill Sw = STOP' and 'structured_data' not in entry
+
+
+def test_log_level_prefixes_still_work_on_gen3_text():
+    entry = _parse(_gen3('DEBUG: Turning ON DCDC'), gen3_text=True)
+    assert entry['event'] == 'Turning ON DCDC' and entry['log_level'] == 'DEBUG'
+
+
+def test_legacy_path_is_unchanged_by_the_gen3_flag_being_off():
+    # The same bytes through the legacy path (gen3_text False) render exactly
+    # as before: the string read from payload byte 0.
     payload = _gen3('Precharge: 95%')
-    out = Gen2.debug_message(payload)
-    # parse_entry() would have run improve_message_parsing() on the plain
-    # event; the structured path applies the same call, so the text matches.
-    from zero_log_parser import improve_message_parsing
-    plain = BinaryTools.unpack_str(payload, 0x0, count=len(payload) - 1)
-    expected = improve_message_parsing(plain, '')[:2]
-    assert (out['event'], out['conditions']) == expected
-    assert out['structured_data']['precharge_percent'] == 95
-    out = Gen2.debug_message(_gen3('Kill Sw = STOP'))
-    assert 'structured_data' not in out
+    legacy = _parse(payload, gen3_text=False)
+    assert legacy['event'] == Gen2.debug_message(payload)['event']
+    assert 'structured_data' not in legacy
+    classic = _parse(bytearray(b'Precharge: 95%\x00'), gen3_text=False)
+    assert classic['event'] == 'Precharge: 95%' and 'structured_data' not in classic
+    # and a classic entry is not affected by the debug_message() refactor
+    out = Gen2.debug_message(bytearray(b'DEBUG: hello\x00'))
+    assert out['event'] == 'hello' and out['log_level'] == 'DEBUG'
+
+
+def test_marker_inside_a_message_is_shown_as_a_corrupted_span_not_deleted():
+    payload = _gen3(b'Entering ZERO' + ARTIFACT + b'_STATE_IDLE')
+    entry = _parse(payload, gen3_text=True)
+    assert entry['event'] == 'Entering ZERO{corrupted: 4 bytes lost}_STATE_IDLE'
+    # the structured parse keeps matching on the marker-removed form, as before
+    rendered = Gen2.gen3_text_message(payload)
+    assert rendered['parse_text'] == 'Entering ZERO_STATE_IDLE' and rendered['bytes_lost'] == 4
+
+
+def test_marker_overlapping_the_start_of_the_message():
+    payload = bytearray(struct.pack('<I', 161000) + b'\x00' + b'\x00\xf0\xff\x00' + b'ting Hibernate\x00')
+    payload = payload[:5] + bytearray(b'\x00\xf0\xff\x00ting Hibernate\x00')   # marker at byte 5
+    rendered = Gen2.gen3_text_message(payload)
+    assert rendered['display'] == '{corrupted: 3 bytes lost}ting Hibernate' and rendered['bytes_lost'] == 3
+
+
+def test_message_destroyed_by_the_marker_follows_the_corrupted_convention():
+    entry = _parse(_gen3(ARTIFACT), gen3_text=True)
+    assert entry['event'] == '{corrupted: 4 bytes lost}'
+    assert entry['structured_data']['bytes_corrupted'] is True
+    assert entry['structured_data']['corrupted_byte_count'] == 4
+
+
+def test_damaged_tail_bytes_are_shown_as_undecoded_hex_not_garbage():
+    entry = _parse(_gen3(b'Saving stats,\xb2FM\xe2'.replace(b'\xb2', b'\xb3')), gen3_text=True)
+    assert entry['event'] == 'Saving stats,{undecoded hex: b3 46 4d e2}'
+
+
+def test_prefix_damage_without_a_marker_is_undecodable_and_not_guessed():
+    payload = bytearray(b'p_\xfe\xff\xff\xff\x1d\xd8\x03\x04\x06')
+    entry = _parse(bytearray(b'p_\xfa\xff\xff\xff\x1d\xd8\x03\x04\x06'), gen3_text=True)
+    assert entry['event'].startswith('{undecoded hex: 70 5f fa ff ff ff')
+    # a marker over the sub-second field leaves the message readable
+    damaged = bytearray(ARTIFACT[:4] + b'\x01\x01' + b'Fault cleared: HVIL_OPEN\x00')
+    entry = _parse(damaged, gen3_text=True)
+    assert entry['event'] == 'Fault cleared: HVIL_OPEN'
+    assert entry['structured_data']['fault_code'] == 'HVIL_OPEN'

@@ -1472,20 +1472,132 @@ class Gen2:
     )
 
     @classmethod
-    def gen3_text_event(cls, x):
-        """Structured numbers from a Gen3 0xFD text entry, or None. Never
-        changes the entry's event or conditions text; used only to add
-        structured_data. Classic (non-FST) text entries have no prefix and are
-        not touched: the gate needs a plausible sub-second value in the first
-        four bytes, which printable text never has."""
+    def gen3_text_message(cls, x):
+        """The one place that turns a Gen3 (FST) 0xFD payload into text; used by
+        both gen3_debug_message() (the visible event) and gen3_text_event()
+        (structured numbers) so they cannot drift apart. Only called for
+        entries on the FST path (log_version REV3); legacy 0xFD entries never
+        reach it. The payload is the 6-byte FST prefix (sub-second us u32,
+        sequence, marker) followed by the NUL-terminated message.
+
+        The FST page marker 00 f0 ff 00 overwrites four bytes wherever it
+        lands (analysis/gen3_text_fix.md: of 140,431 text entries with the
+        marker inside the message, 107,809 equal a known message with four
+        bytes replaced and 3,302 an inserted marker; the rest cannot be
+        checked), so deleting it would show wrong text. The visible text
+        therefore carries the project's corrupted-span tag, "{corrupted: N
+        bytes lost}", where each marker was. Bytes that are not printable
+        ASCII (damaged tails) are shown as an undecoded-hex tag, never
+        guessed at.
+
+        Returns a dict, or None when the payload cannot be a Gen3 text entry:
+          display       text for the event, markers and odd bytes tagged
+          parse_text    the message with each marker simply removed (the form
+                        gen3_text_event() has always matched against), or None
+                        if it holds a non-printable byte
+          bytes_lost    bytes the marker(s) destroyed inside the message
+          prefix_damaged  True when the marker overlapped the 6-byte prefix
+          undecodable   True when the prefix is damaged without a marker to
+                        explain it; display is then the undecoded hex tag
+        """
+        marker = cls.PAGE_MARKER
         if len(x) <= 6:
             return None
-        if BinaryTools.unpack('uint32', x, 0) > cls.FST_SUBSECOND_MAX_US:
+        start = 6
+        prefix_damaged = False
+        lost = 0
+        lead = ''
+        gate_failed = BinaryTools.unpack('uint32', x, 0) > cls.FST_SUBSECOND_MAX_US
+        at = bytes(x[:9]).find(marker)
+        if at < 0:
+            if gate_failed:
+                return {'display': cls.undecoded_hex_display(x), 'parse_text': None,
+                        'bytes_lost': 0, 'prefix_damaged': True, 'undecodable': True}
+        else:
+            # A marker that starts inside the prefix (or ends inside the first
+            # message bytes): the prefix is damaged, and any part of the marker
+            # past byte 6 replaced the start of the message.
+            prefix_damaged = at < 6
+            if at + 4 > 6:
+                start = at + 4
+                lost = at + 4 - 6
+                lead = cls.corrupted_span_display(lost)
+        body = bytes(x[start:])
+        parts = []
+        parse = bytearray()
+        i = 0
+        run = bytearray()
+        parse_ok = True
+        while i < len(body):
+            if body[i:i + 4] == marker:
+                if run:
+                    parts.append(run.decode('ascii'))
+                    run = bytearray()
+                parts.append(cls.corrupted_span_display(4))
+                lost += 4
+                i += 4
+                continue
+            if body[i] == 0:
+                break
+            if 0x20 <= body[i] <= 0x7e:
+                run.append(body[i])
+                parse.append(body[i])
+                i += 1
+                continue
+            # a damaged tail: show the rest of the message as undecoded bytes
+            parse_ok = False
+            if run:
+                parts.append(run.decode('ascii'))
+                run = bytearray()
+            j = i
+            while j < len(body) and body[j] != 0 and body[j:j + 4] != marker:
+                j += 1
+            parts.append(cls.undecoded_hex_display(body[i:j]))
+            i = j
+        if run:
+            parts.append(run.decode('ascii'))
+        display = lead + ''.join(parts)
+        parse_text = parse.decode('ascii') if parse_ok and parse else None
+        return {'display': display, 'parse_text': parse_text, 'bytes_lost': lost,
+                'prefix_damaged': prefix_damaged, 'undecodable': False}
+
+    @classmethod
+    def gen3_debug_message(cls, x):
+        """Types 0xFD on the FST path: the message after the 6-byte prefix, with
+        the same content-based handling as the legacy debug_message()."""
+        rendered = cls.gen3_text_message(x)
+        if rendered is None:
+            return cls.debug_message(x)
+        if rendered['undecodable']:
+            return {
+                'event': rendered['display'],
+                'log_level': 'WARNING',
+                'structured_data': {'raw_hex': bytes(x).hex()},
+            }
+        structured = cls._gen3_text_structured(rendered['parse_text'])
+        entry = cls._debug_text_entry(rendered['display'], structured)
+        if not any(c.isalnum() for c in re.sub(r'\{[^}]*\}', '', rendered['display'])):
+            # Nothing of the message survived: the convention for a destroyed
+            # entry, event shown as the span tag, flags set on structured_data.
+            sd = dict(entry.get('structured_data') or {})
+            cls.mark_bytes_corrupted(sd, rendered['bytes_lost'])
+            entry['structured_data'] = sd
+            entry['log_level'] = entry.get('log_level') or 'WARNING'
+        return entry
+
+    @classmethod
+    def gen3_text_event(cls, x):
+        """Structured numbers from a Gen3 0xFD text entry, or None. See
+        gen3_text_message() for the text handling."""
+        rendered = cls.gen3_text_message(x)
+        if rendered is None or rendered['undecodable']:
             return None
-        raw = bytes(x[6:]).replace(cls.GEN3_TEXT_ARTIFACT, b'').split(b'\x00')[0]
-        if not raw or not all(0x20 <= b <= 0x7e for b in raw):
+        return cls._gen3_text_structured(rendered['parse_text'])
+
+    @classmethod
+    def _gen3_text_structured(cls, text):
+        if not text:
             return None
-        text = raw.decode('ascii')
         for kind, pattern in cls.GEN3_TEXT_PATTERNS:
             m = pattern.fullmatch(text)
             if not m:
@@ -1530,7 +1642,15 @@ class Gen2:
     def debug_message(cls, x):
         # Extract the debug message string
         message = BinaryTools.unpack_str(x, 0x0, count=len(x) - 1)
+        return cls._debug_text_entry(message)
 
+    @classmethod
+    def _debug_text_entry(cls, message, gen3_structured=None):
+        """The content-based half of debug_message(), shared by the legacy
+        path (message read from payload byte 0) and the Gen3 path (message
+        from gen3_text_message()). gen3_structured, when given, is added as
+        structured_data after improve_message_parsing() has been applied
+        exactly as parse_entry() would have applied it."""
         log_level = None
 
         # Check if this is a SOC data message and optimize it directly
@@ -1672,9 +1792,7 @@ class Gen2:
                     }
 
         # For other debug messages, return as normal. A recognised Gen3 text
-        # line additionally gets structured_data; event and conditions stay
-        # exactly as they were.
-        gen3_structured = cls.gen3_text_event(x)
+        # line (Gen3 path only) additionally gets structured_data.
         if gen3_structured is not None:
             # parse_entry() skips improve_message_parsing() for any entry that
             # already carries structured_data, so apply it here, exactly as
@@ -2592,18 +2710,21 @@ class Gen2:
     #       controller validity group (zero exactly when that flag is set).
     # The tail after the temperatures is present only in some variants; the
     # offsets below are tag-relative and the four bytes of the tail that the
-    # short variants lack are the DC-DC voltage and its pad, so every later
+    # short variants lack are the 12 V battery voltage and its pad, so every later
     # field sits 4 bytes earlier in them:
-    #   +29 u24 LE, uV - 12 V system voltage, long variants only. Keyed
-    #       dc_dc_bus_voltage_volts. Cross-checks (analysis/
-    #       bms_fields_and_text_events.md, Items 5 and 7): it equals the
-    #       "Battery" value in the MBB's "Requesting/Stopping 12v charge" text
-    #       (median difference 0, within 50 mV in 98.3% of 21,643 joined
-    #       entries, correlation 0.994), NOT that text's "DC-DC" value (about
-    #       0.29 V) nor its "Combined" value (0.73 V lower), so it is the 12 V
-    #       battery reading; the key name predates that finding. It also sits
-    #       on the outside spec's ADC lattice v = 5128 x k + 4864 uV (5.128 mV
-    #       LSB, about 21 V full scale) in 46,966 of 46,967 entries.
+    #   +29 u24 LE, uV - battery_12v_volts, long variants only. The
+    #       battery-side sense point of the Gen3 12 V system: with the DC-DC
+    #       converter running it is the same node as the converter output,
+    #       but it stays meaningful when the converter is off. It does not
+    #       exist on legacy bikes or on the Gen3 short variants (firmware
+    #       13-30). Evidence (analysis/bms_fields_and_text_events.md, Items 5
+    #       and 7): it equals the "Battery" value in the MBB's
+    #       "Requesting/Stopping 12v charge" text (median difference 0, within
+    #       50 mV in 98.3% of 21,643 joined entries, correlation 0.994), not
+    #       that text's "DC-DC" value (about 0.29 V) or its "Combined" value
+    #       (0.73 V lower); and it sits on the ADC lattice
+    #       v = 5128 x k + 4864 uV (5.128 mV LSB, about 21 V full scale) in
+    #       46,966 of 46,967 entries. Formerly keyed dc_dc_bus_voltage_volts.
     #   +35/+31 u24 LE - cumulative distance counter, never decreases,
     #       advances only while RUN; distance_km = counter x 0.1 km (the unit
     #       is a decision, see TELEMETRY_DISTANCE_KM_PER_UNIT). Fitted 5.15e-5
@@ -2717,8 +2838,8 @@ class Gen2:
         tail = cls.TELEMETRY_TAIL_FIELDS.get((message_type, len(x)), {})
         if 'aux' in tail:
             aux_uv = int.from_bytes(bytes(x[tag_offset + tail['aux']:tag_offset + tail['aux'] + 3]), 'little')
-            data['dc_dc_bus_voltage_volts'] = aux_uv / 1e6
-            conditions += f", Vdcdc:{aux_uv / 1e6:.2f}V"
+            data['battery_12v_volts'] = aux_uv / 1e6
+            conditions += f", Vbat12:{aux_uv / 1e6:.2f}V"
         if 'counter' in tail:
             at = tag_offset + tail['counter']
             counter = int.from_bytes(bytes(x[at:at + 3]), 'little')
@@ -3537,7 +3658,7 @@ class Gen2:
         }
 
     @classmethod
-    def _entry_parsers(cls, log_type=None):
+    def _entry_parsers(cls, log_type=None, gen3_text=False):
         """The message_type -> decoder dict parse_entry() dispatches through.
         Factored out (pure extraction, no behavior change) so
         collect_paged_bms_entries() can reuse the exact same dispatch table
@@ -3614,6 +3735,11 @@ class Gen2:
             0xfb: cls.mbb_system_information,   # Type 251
             0xfd: cls.debug_message
         }
+        if gen3_text:
+            # FST path only (log_version REV3): the payload of a 0xFD entry
+            # starts with the shared 6-byte prefix, so the message is not at
+            # byte 0. Legacy files keep debug_message() untouched.
+            parsers[0xfd] = cls.gen3_debug_message
         if log_type == LogFile.log_type_mbb:
             parsers[0x10] = cls.mbb_throttle_enable_wire_disable
             parsers[0x11] = cls.mbb_throttle_enable_wire_reenable
@@ -3818,7 +3944,7 @@ class Gen2:
             return 0
 
     @classmethod
-    def collect_paged_bms_entries(cls, buf, logger, timezone_offset=None, verbosity_level=1, log_type=None):
+    def collect_paged_bms_entries(cls, buf, logger, timezone_offset=None, verbosity_level=1, log_type=None, gen3_text=False):
         """Marker-aware entry walk for the FST/Gen3 BMS page format
         (is_paged_bms_format()). Builds the same (sort_timestamp,
         entry_payload, entry_num) list LogData._collect_and_process_entries'
@@ -3864,7 +3990,7 @@ class Gen2:
         silently depending on a platform fact the other doesn't rely on.
         """
         n = len(buf)
-        parsers = cls._entry_parsers(log_type)
+        parsers = cls._entry_parsers(log_type, gen3_text=gen3_text)
 
         # Pass 1: find every entry's (start, length) exactly as the normal
         # resync walk does - same header search, same zero-length handling
@@ -3965,7 +4091,7 @@ class Gen2:
         return collected
 
     @classmethod
-    def parse_entry(cls, log_data, address, unhandled, logger, timezone_offset=None, verbosity_level=1, log_type=None):
+    def parse_entry(cls, log_data, address, unhandled, logger, timezone_offset=None, verbosity_level=1, log_type=None, gen3_text=False):
         """
         Parse an individual entry from a LogFile into a human readable form
 
@@ -3975,6 +4101,9 @@ class Gen2:
         to the right decoder. Omitting it keeps the pre-existing,
         BMS-decoder behavior. See _entry_parsers() and
         analysis/mbb_dispatch_fix.md.
+
+        gen3_text=True (set by LogData for log_version REV3, the FST path)
+        selects gen3_debug_message() for type 0xFD; legacy files never set it.
         """
         try:
             header = log_data[address]
@@ -4006,7 +4135,7 @@ class Gen2:
         message_type = cls.type_from_block(unescaped_block)
         message = unescaped_block[0x05:]
 
-        parsers = cls._entry_parsers(log_type)
+        parsers = cls._entry_parsers(log_type, gen3_text=gen3_text)
         entry_parser = parsers.get(message_type)
         try:
             if entry_parser:
@@ -4323,7 +4452,8 @@ class LogData(object):
                 # matter how that loop is tuned.
                 collected_entries = Gen2.collect_paged_bms_entries(
                     self.entries, logger, timezone_offset=self.timezone_offset,
-                    verbosity_level=verbosity_level, log_type=dispatch_log_type)
+                    verbosity_level=verbosity_level, log_type=dispatch_log_type,
+                    gen3_text=True)
             elif hasattr(self, 'entries_count'):
                 for entry_num in range(self.entries_count):
                     try:
@@ -4331,7 +4461,8 @@ class LogData(object):
                                                                               0,  # unhandled counter
                                                                               timezone_offset=self.timezone_offset,
                                                                               logger=logger, verbosity_level=verbosity_level,
-                                                                              log_type=dispatch_log_type)
+                                                                              log_type=dispatch_log_type,
+                                                                              gen3_text=(self.log_version == REV3))
 
                         # Extract timestamp for sorting
                         time_str = entry_payload.get('time', '0')
