@@ -104,11 +104,11 @@ def test_entry_level_bytes_corrupted_is_never_set_by_field_corruption():
 
 
 def test_marker_outside_any_named_field_corrupts_nothing():
-    # The marker lands in the unidentified byte range (payload[25:38], never
+    # The marker lands in the unidentified byte range (payload[31:38], never
     # read by any named field) - every field decodes to its real value and
     # corrupted_fields is absent entirely.
     payload = _cell_telemetry_payload()
-    payload[25:29] = MARK
+    payload[31:35] = MARK
     entry = _decode_one(_entry(0x4b, 1_700_000_000, payload))
     sd = entry['structured_data']
     assert 'corrupted_fields' not in sd

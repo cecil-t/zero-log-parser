@@ -109,12 +109,18 @@ def test_current_is_a_32bit_field_not_16bit():
     assert sd['pack_voltage_volts'] == 96.468
 
 
-def test_no_field_is_named_temperature():
-    # The temperature label was dropped 2026-09-24 (no independent
-    # confirmation found in the file set); the byte stays undecoded.
+def test_temperature_fields_exist_now_that_paired_mbb_files_confirm_them():
+    # The temperature label was dropped 2026-09-24 for want of independent
+    # confirmation. Paired BMS/MBB files supply it (analysis/
+    # bms_fields_and_text_events.md): payload 25 correlates 0.87 with the MBB
+    # pack temperatures, and the hottest/coldest cell bytes on 0x4C/0x4D match
+    # the MBB pack warmest/coldest within 1 C in about 86% of joined entries.
     for message_type in TIERS:
         out = Gen2.bms_cell_telemetry(message_type, _payload(message_type))
-        assert not any('temp' in key.lower() for key in out['structured_data'])
+        assert 'bms_temperature_c' in out['structured_data']
+    for message_type in (0x4c, 0x4d):
+        sd = Gen2.bms_cell_telemetry(message_type, _payload(message_type))['structured_data']
+        assert 'cell_temperature_hottest_c' in sd and 'cell_temperature_coldest_c' in sd
 
 
 def test_raw_hex_preserves_the_whole_payload():

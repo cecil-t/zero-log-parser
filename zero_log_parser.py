@@ -1383,6 +1383,149 @@ class Gen2:
             'conditions': legacy_conditions
         }
 
+    # --- Gen3 (FST) 0xFD text entries. Their payload starts with the 6-byte FST
+    # prefix (sub-second us, sequence, marker); debug_message() reads the whole
+    # payload as a string, so the event text of every Gen3 text entry is the
+    # prefix bytes, not the message (analysis/bms_fields_and_text_events.md).
+    # That text is left exactly as it was. The real message is payload[6:], with
+    # the page-boundary artifact 00 f0 ff 00 removed where it interrupts a word.
+    # gen3_text_event() parses the message into structured_data only, and only
+    # for complete, recognised lines; damaged lines (text truncated or
+    # overwritten by the page marker) are left unparsed.
+    GEN3_TEXT_ARTIFACT = b'\x00\xf0\xff\x00'
+    GEN3_FAULT_CODES = frozenset([
+        '12V_BATT_COLD',
+        '12V_BATT_LOW',
+        '12V_COMBINED_LVC',
+        '12V_COMBINED_LVW',
+        '12V_HEATER_DISCONNECTED',
+        'ALL_CONTACTORS_OPEN',
+        'BALANCE_CIRCUIT',
+        'BMS_12V_OUT_OF_RANGE',
+        'BMS_BATT_TEMP_LOW',
+        'BMS_CELL_ANOMALY',
+        'BMS_CELL_TOO_LOW_FOR_CHARGE',
+        'BMS_CONTACTOR',
+        'BMS_CURRENT_SENSOR',
+        'BMS_DISCHARGE',
+        'BMS_GENERAL',
+        'BMS_LOW_VOLTAGE',
+        'BMS_RESERVE_VOLTAGE',
+        'BMS_STATE',
+        'BMS_TEMP_SENSOR',
+        'BMS_VOLTAGE_LOW_CRITICAL',
+        'CCM_AUTHENTICATION',
+        'CHARGER_DASH_CAN',
+        'CHARGER_ERROR',
+        'CHARGER_FAN',
+        'CHARGER_NOT_CONNECTED',
+        'CONTROLLER_FAULT',
+        'CONTROLLER_WARNING',
+        'DC_DC_LOW',
+        'FW_UPDATE_FAIL',
+        'HEATED_GRIP',
+        'HIGH_THROTTLE',
+        'HIGH_THROT_NOTIFY',
+        'HVIL_OPEN',
+        'IMMOBILIZER_DISCONNECTED',
+        'IMMOBILIZER_ERROR',
+        'INVALID/NO CELL TYPE',
+        'INVALID/NO PACK TYPE',
+        'ISOLATION',
+        'LEFT_BLINKER_BULB_OUT',
+        'LOGGING',
+        'LOWBEAM_BULB_OUT',
+        'LPB+ LOW',
+        'MODULE_AWAITING_CONNECTION',
+        'MODULE_CHARGE_INELIGIBLE',
+        'MODULE_DISABLED',
+        'MODULE_ELIGIBILITY_TIMEOUT',
+        'MODULE_INELIGIBLE',
+        'MSC_CAN',
+        'MSC_ERROR',
+        'MSC_NOT_ALIVE',
+        'PILOT_SIGNAL_INVALID',
+        'QUEUE_SEND_FAIL',
+        'REGION_INVALID',
+        'RIGHT_BLINKER_BULB_OUT',
+        'SELF TEST',
+        'SELFTEST',
+        'SIGNIFICANT_PWR_LIMIT',
+        'THROTTLE_MAP',
+    ])
+    GEN3_BMS_STATES = frozenset([
+        'IDLE', 'STANDBY', 'HIBERNATE', 'UNLOCK', 'OPERATIONAL', 'PRECHARGE',
+        'PRECHARGE_COMPLETE', 'FAULT',
+    ])
+    GEN3_STORAGE_MODE_SECONDS = 31536000
+    GEN3_TEXT_PATTERNS = (
+        ('limits', re.compile(r'(Disch|Ch) limits: curr (\d+) cap (\d+) act (\d+) pow (\d+)')),
+        ('twelve_volt', re.compile(
+            r'(Requesting|Stopping|Starting) 12v charge\.\s+DC-DC (-?\d+)uV, '
+            r'Battery (-?\d+)uV, Combined (-?\d+)uV, Ambient (-?\d+)C')),
+        ('module', re.compile(r'Registering Mod (\d+) \((\d+)mV, (\d+) brick \)')),
+        ('module_short', re.compile(r'Registering Module (\d+) \( (\d+)mV \)')),
+        ('fault', re.compile(r'Fault (set|pending|cleared): ([A-Z0-9_/+ ]+?)(?: sets in (\d+) seconds)?')),
+        ('state', re.compile(r'Entering ZERO_BMS_STATE_([A-Z_]+)')),
+        ('hibernate', re.compile(r'Saving [Ss]tats, [Hh]ibernating for (\d+) sec')),
+        ('precharge', re.compile(r'Precharge: (\d+)%')),
+    )
+
+    @classmethod
+    def gen3_text_event(cls, x):
+        """Structured numbers from a Gen3 0xFD text entry, or None. Never
+        changes the entry's event or conditions text; used only to add
+        structured_data. Classic (non-FST) text entries have no prefix and are
+        not touched: the gate needs a plausible sub-second value in the first
+        four bytes, which printable text never has."""
+        if len(x) <= 6:
+            return None
+        if BinaryTools.unpack('uint32', x, 0) > cls.FST_SUBSECOND_MAX_US:
+            return None
+        raw = bytes(x[6:]).replace(cls.GEN3_TEXT_ARTIFACT, b'').split(b'\x00')[0]
+        if not raw or not all(0x20 <= b <= 0x7e for b in raw):
+            return None
+        text = raw.decode('ascii')
+        for kind, pattern in cls.GEN3_TEXT_PATTERNS:
+            m = pattern.fullmatch(text)
+            if not m:
+                continue
+            g = m.groups()
+            if kind == 'limits':
+                return {'text': text, 'text_event': 'limits',
+                        'limit_direction': 'discharge' if g[0] == 'Disch' else 'charge',
+                        'limit_curr': int(g[1]), 'limit_cap': int(g[2]),
+                        'limit_act': int(g[3]), 'limit_pow': int(g[4])}
+            if kind == 'twelve_volt':
+                return {'text': text, 'text_event': 'twelve_volt_charge',
+                        'charge_phase': g[0].lower(),
+                        'dc_dc_volts': int(g[1]) / 1e6, 'battery_volts': int(g[2]) / 1e6,
+                        'combined_volts': int(g[3]) / 1e6, 'ambient_temperature_c': int(g[4])}
+            if kind in ('module', 'module_short'):
+                data = {'text': text, 'text_event': 'module_registration',
+                        'module_number': int(g[0]), 'module_voltage_volts': int(g[1]) / 1000.0}
+                if kind == 'module':
+                    data['brick_count'] = int(g[2])
+                return data
+            if kind == 'fault':
+                if g[1] not in cls.GEN3_FAULT_CODES:
+                    return None
+                data = {'text': text, 'text_event': 'fault', 'fault_state': g[0], 'fault_code': g[1]}
+                if g[2] is not None:
+                    data['fault_sets_in_seconds'] = int(g[2])
+                return data
+            if kind == 'state':
+                if g[0] not in cls.GEN3_BMS_STATES:
+                    return None
+                return {'text': text, 'text_event': 'bms_state', 'bms_state': g[0]}
+            if kind == 'hibernate':
+                seconds = int(g[0])
+                return {'text': text, 'text_event': 'hibernate', 'hibernate_seconds': seconds,
+                        'storage_mode': seconds == cls.GEN3_STORAGE_MODE_SECONDS}
+            if kind == 'precharge':
+                return {'text': text, 'text_event': 'precharge', 'precharge_percent': int(g[0])}
+        return None
+
     @classmethod
     def debug_message(cls, x):
         # Extract the debug message string
@@ -1528,7 +1671,16 @@ class Gen2:
                         'conditions': message
                     }
 
-        # For other debug messages, return as normal
+        # For other debug messages, return as normal. A recognised Gen3 text
+        # line additionally gets structured_data; event and conditions stay
+        # exactly as they were.
+        gen3_structured = cls.gen3_text_event(x)
+        if gen3_structured is not None:
+            return {
+                'event': message,
+                'log_level': log_level,
+                'structured_data': gen3_structured
+            }
         return {
             'event': message,
             'log_level': log_level
@@ -2237,6 +2389,108 @@ class Gen2:
     }
     BMS_CELL_TELEMETRY_FIELD_BASE = 14  # x-offset of the block's first byte for 0x4B
 
+    # --- BMS-side fields beyond the cell-voltage block (analysis/bms_fields_and_text_events.md).
+    # Offsets below are payload offsets of the 0x4B shape; 0x4C adds 4 and 0x4D
+    # adds 8 (the same tier shift as BMS_CELL_TELEMETRY_TIERS), except where a
+    # table gives absolute offsets. Every byte-valued field reads 0xF0 / 0xFF
+    # as "no data" (None); those two values mark placeholder records, and the
+    # BMS temperature byte is only ever seen in the 0-80 range otherwise.
+    BMS_SENTINEL_BYTES = (0xf0, 0xff)
+    # Variants that carry the newer status layout (payload 28/29 meaning).
+    BMS_STATUS_LONG_VARIANTS = frozenset([(0x4b, 45), (0x4c, 63), (0x4d, 71)])
+    # (message_type, payload length) -> (coldest cell C, hottest cell C), absolute offsets.
+    # Confirmed against the paired MBB pack_temperature_coldest/warmest (within
+    # 1 C in 83-87% / 86-87% of joined entries; hottest >= coldest in 99%).
+    BMS_CELL_TEMPERATURE_OFFSETS = {
+        (0x4c, 61): (47, 48), (0x4c, 63): (49, 50),
+        (0x4d, 69): (51, 52), (0x4d, 71): (53, 54),
+    }
+    # (message_type, payload length) -> (register, twin) u24 LE, mAh, absolute offsets.
+    BMS_CAPACITY_OFFSETS = {(0x4d, 69): (58, 65), (0x4d, 71): (60, 67)}
+    # (message_type, payload length) -> u16 LE charge current limit, A, absolute offset.
+    BMS_CHARGE_LIMIT_OFFSETS = {
+        (0x4c, 61): 52, (0x4c, 63): 54, (0x4d, 69): 56, (0x4d, 71): 58,
+    }
+    BMS_U16_SENTINELS = frozenset([0xf0f0, 0xf0ff, 0xfff0, 0xffff])
+
+    @classmethod
+    def bms_telemetry_status_fields(cls, message_type, x):
+        """Status, temperature, capacity, limit and fault-flag fields shared by
+        the BMS 0x4B/0x4C/0x4D shapes. Pure additions to bms_cell_telemetry's
+        structured data; every value read from a payload byte that holds
+        0xF0 or 0xFF is None. See analysis/bms_fields_and_text_events.md for
+        the evidence. Returns (structured_data updates, conditions fragment)."""
+        shift = cls.BMS_CELL_TELEMETRY_TIERS[message_type][0]
+        key = (message_type, len(x))
+        sentinels = cls.BMS_SENTINEL_BYTES
+
+        def byte_at(offset, sentinels=sentinels):
+            value = BinaryTools.unpack('uint8', x, offset)
+            return None if value in sentinels else value
+
+        data = {}
+        conditions = []
+
+        # payload 10: sleep indicator. 0x20 sleeping, 0x00 awake; other
+        # values are combinations (0x40, 0x60, ...) left numeric.
+        sleep = byte_at(10 + shift)
+        data['bms_sleep_indicator'] = sleep
+        data['bms_sleeping'] = None if sleep not in (0x00, 0x20) else sleep == 0x20
+
+        # payload 38: report mode. 7 is "active": bus engaged, MBB in RUN/CHRG/STOP,
+        # at or above 10 A in 62% of entries. Other values stay numeric.
+        mode = byte_at(38 + shift)
+        data['bms_report_mode'] = mode
+        data['bms_report_mode_label'] = 'active' if mode == 7 else None
+
+        # payload 25: a temperature (0.87 correlation with the MBB pack temperatures).
+        data['bms_temperature_c'] = byte_at(25 + shift)
+
+        if key in cls.BMS_STATUS_LONG_VARIANTS:
+            # 0xFF is a real value here (under load), so only 0xF0 reads as no
+            # data; a 0xFF from a placeholder record cannot be told apart, but
+            # the bus flag next to it is None in those records.
+            data['bms_load_flag'] = byte_at(28 + shift, (0xf0,))   # 0xFF / 0x78: tracks the bus flag in 98%
+            bus = byte_at(29 + shift)
+            data['bms_bus_engaged'] = None if bus not in (0, 1) else bool(bus)
+
+        if message_type == 0x4b:
+            # Near-constant bytes whose rare non-zero values line up with
+            # "Fault set/cleared" text (value 4 at payload 11 with a cleared
+            # INVALID/NO PACK TYPE, 0x60 at payload 30 with a set SELF TEST).
+            data['pack_fault_flags_a'] = byte_at(11)
+            data['pack_fault_flags_b'] = byte_at(30)
+
+        if key in cls.BMS_CELL_TEMPERATURE_OFFSETS:
+            coldest_at, hottest_at = cls.BMS_CELL_TEMPERATURE_OFFSETS[key]
+            data['cell_temperature_coldest_c'] = byte_at(coldest_at)
+            data['cell_temperature_hottest_c'] = byte_at(hottest_at)
+
+        if key in cls.BMS_CAPACITY_OFFSETS:
+            for name, at in zip(('full_charge_capacity_ah', 'full_charge_capacity_twin_ah'),
+                                cls.BMS_CAPACITY_OFFSETS[key]):
+                raw = bytes(x[at:at + 3])
+                data[name] = None if raw in (b'\xf0\xf0\xf0', b'\xff\xff\xff') else \
+                    int.from_bytes(raw, 'little') / 1000.0
+
+        if key in cls.BMS_CHARGE_LIMIT_OFFSETS:
+            limit = BinaryTools.unpack('uint16', x, cls.BMS_CHARGE_LIMIT_OFFSETS[key])
+            data['bms_charge_current_limit_amps'] = None if limit in cls.BMS_U16_SENTINELS else limit
+
+        for name, text in (('bms_temperature_c', 'Tbms'), ('cell_temperature_hottest_c', 'Tcellmax'),
+                           ('cell_temperature_coldest_c', 'Tcellmin')):
+            if name in data:
+                conditions.append(f"{text}:{'n/a' if data[name] is None else data[name]}C")
+        if 'full_charge_capacity_ah' in data:
+            v = data['full_charge_capacity_ah']
+            conditions.append(f"Cap:{'n/a' if v is None else format(v, '.3f')}Ah")
+        if 'bms_charge_current_limit_amps' in data:
+            v = data['bms_charge_current_limit_amps']
+            conditions.append(f"ChgLim:{'n/a' if v is None else v}A")
+        if data.get('bms_report_mode') is not None:
+            conditions.append(f"Mode:{data['bms_report_mode']}")
+        return data, ', '.join(conditions)
+
     @classmethod
     def bms_cell_telemetry(cls, message_type, x):
         """Types 0x4B/0x4C/0x4D, BMS side - cell telemetry snapshot.
@@ -2277,6 +2531,8 @@ class Gen2:
             'pack_voltage_volts': pack_voltage_mv / 1000.0,
         })
 
+        status, status_conditions = cls.bms_telemetry_status_fields(message_type, x)
+        structured_data.update(status)
         structured_data['raw_hex'] = bytes(x).hex()
 
         conditions = (
@@ -2284,6 +2540,8 @@ class Gen2:
             f"Vpack:{structured_data['pack_voltage_volts']:.3f}V, "
             f"I:{structured_data['battery_current_amps']:.3f}A"
         )
+        if status_conditions:
+            conditions += ', ' + status_conditions
 
         return {
             'event': 'BMS Cell Telemetry',
@@ -2330,7 +2588,16 @@ class Gen2:
     # offsets below are tag-relative and the four bytes of the tail that the
     # short variants lack are the DC-DC voltage and its pad, so every later
     # field sits 4 bytes earlier in them:
-    #   +29 u24 LE, uV - DC-DC (12 V auxiliary) bus voltage, long variants only
+    #   +29 u24 LE, uV - 12 V system voltage, long variants only. Keyed
+    #       dc_dc_bus_voltage_volts. Cross-checks (analysis/
+    #       bms_fields_and_text_events.md, Items 5 and 7): it equals the
+    #       "Battery" value in the MBB's "Requesting/Stopping 12v charge" text
+    #       (median difference 0, within 50 mV in 98.3% of 21,643 joined
+    #       entries, correlation 0.994), NOT that text's "DC-DC" value (about
+    #       0.29 V) nor its "Combined" value (0.73 V lower), so it is the 12 V
+    #       battery reading; the key name predates that finding. It also sits
+    #       on the outside spec's ADC lattice v = 5128 x k + 4864 uV (5.128 mV
+    #       LSB, about 21 V full scale) in 46,966 of 46,967 entries.
     #   +35/+31 u24 LE - cumulative distance counter, never decreases,
     #       advances only while RUN; distance_km = counter x 0.1 km (the unit
     #       is a decision, see TELEMETRY_DISTANCE_KM_PER_UNIT). Fitted 5.15e-5
