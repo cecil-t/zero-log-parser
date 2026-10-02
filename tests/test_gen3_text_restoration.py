@@ -105,6 +105,20 @@ def test_the_inserted_marker_reading_restores_without_a_tag():
     _reset()
 
 
+def test_a_marker_that_is_the_last_four_bytes_covers_the_terminator():
+    # no NUL after the marker: the marker's last byte was the terminator, so three characters are lost
+    _table(bms=[('B1', [('lit', 'Entering ZERO_BMS_STATE_HIBERNATE')]), ('B2', [('lit', 'Entering ZERO_BMS_STATE_HIBERNATE]')])])
+    payload = bytearray(struct.pack('<I', 161000) + bytes([0, 1]) + b'Entering ZERO_BMS_STATE_HIBERN' + MARK)
+    entry = _parse(payload, 'BMS')
+    assert entry['event'] == 'Entering ZERO_BMS_STATE_HIBERN{restored: ATE}'
+    assert entry['restored_spans'] == [{'offset': 30, 'length': 3, 'text': 'ATE'}] and entry['template_id'] == 'B1'
+    assert entry['event_as_read'] == 'Entering ZERO_BMS_STATE_HIBERN{corrupted: 4 bytes lost}'
+    # the same four bytes followed by a NUL terminator are four lost characters instead
+    entry = _parse(_gen3(b'Entering ZERO_BMS_STATE_HIBERN' + MARK), 'BMS')
+    assert entry['event'] == 'Entering ZERO_BMS_STATE_HIBERN{restored: ATE]}' and entry['template_id'] == 'B2'
+    _reset()
+
+
 def test_both_readings_fitting_is_ambiguous():
     _table(bms=[('B1', [('lit', 'abcdefgh')]), ('B2', [('lit', 'abcd')])])
     # 'abcd' + marker (4 lost) + nothing: overwrite fits abcdefgh, insert fits abcd

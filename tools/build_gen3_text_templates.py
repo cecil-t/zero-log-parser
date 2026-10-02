@@ -11,8 +11,9 @@ directory of log files; the parser never looks at any other file when decoding.
 
 extract   walks every content-unique file, keeps those on the Gen3 (REV3) path, and stores per file
           (resumable, one JSON per content hash under WORK) the intact Gen3 text lines with their
-          counts and the damaged lines as segments. "Intact" means no marker span and no undecoded
-          tag; the page marker is not restored while extracting.
+          counts and the damaged lines as segments. "Intact" means no marker span, no undecoded tag and
+          the message ends with its NUL terminator (a message cut short by a marker at the end of the
+          entry is not a complete message); the page marker is not restored while extracting.
 build     one template per message seen intact in at least --min-files different files (content
           unique), per board (BMS, MBB). A number or hex value is a slot only where it varies across
           the intact occurrences of that message (length bounds from the observed range); a value that
@@ -68,7 +69,7 @@ def extract_one(args):
     del data
     seen = []
     def observer(result, segments, board):
-        seen.append((result['display'], result['bytes_lost'], segments))
+        seen.append((result['display'], result['bytes_lost'], segments, result['intact_text']))
     try:
         lf = zlp.LogFile(path)
         probe = zlp.LogData.__new__(zlp.LogData)
@@ -84,11 +85,11 @@ def extract_one(args):
             Gen2.gen3_text_observer = None
             intact = collections.Counter()
             damaged = []
-            for display, lost, segments in seen:
+            for display, lost, segments, intact_text in seen:
                 if lost:
-                    if not any(k == 'u' for k, _ in segments) and '{undecoded' not in display:
+                    if '{undecoded' not in display:
                         damaged.append(segments)
-                elif '{' not in display:
+                elif intact_text:
                     intact[display] += 1
             rec = {'board': board, 'intact': intact, 'damaged': damaged, 'name': os.path.basename(path)}
     except Exception as exc:                                  # unreadable files are simply not used
@@ -284,8 +285,12 @@ def cmd_evaluate(args):
         r2 = random.Random(100 + seed)
         ok = wrong = tried = 0
         for text in r2.sample(pool, min(args.synthetic, len(pool))):
-            p = r2.randrange(0, len(text) - 3)
-            segs = tuple(((('t', text[:p]),) if p else ()) + (('gap', 4),) + ((('t', text[p + 4:]),) if p + 4 < len(text) else ()))
+            # a marker over the last three characters also covers the NUL terminator (a 'tgap'); anywhere
+            # earlier it overwrites four characters
+            p = r2.randrange(0, len(text) - 2)
+            gap = ('tgap', 3) if p == len(text) - 3 else ('gap', 4)
+            tail = text[p + gap[1]:]
+            segs = tuple(((('t', text[:p]),) if p else ()) + (gap,) + ((('t', tail),) if tail else ()))
             tried += 1
             r = restore(index, segs, 'BMS')
             if r:

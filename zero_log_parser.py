@@ -1614,6 +1614,7 @@ class Gen2:
             return cache[cache_key]
         over, ins = [], []
         lead_gap = bool(segments and segments[0][0] == 'gap' and segments[0][1] < 4)
+        terminator_gap = any(kind == 'tgap' for kind, _ in segments)
         inner_gaps = 0
         for idx, (kind, val) in enumerate(segments):
             if kind == 't':
@@ -1624,7 +1625,9 @@ class Gen2:
                 if not (idx == 0 and lead_gap):
                     inner_gaps += 1
         readings = [('overwrite', over)]
-        if inner_gaps and not lead_gap:
+        # An inserted marker loses nothing; it cannot sit where the terminator was overwritten, and
+        # a lead span (the marker over the start of the message) is always an overwrite.
+        if inner_gaps and not lead_gap and not terminator_gap:
             readings.append(('inserted', ins))
         longest = max((v for k, v in segments if k == 't'), default='')
         key = re.sub(r'#+', '#', re.sub(r'\d+', '#', longest))
@@ -1749,6 +1752,7 @@ class Gen2:
         run = bytearray()
         parse_ok = True
         undecoded = False
+        terminated = body.endswith(b'\x00')
         while i < len(body):
             if body[i:i + 4] == marker:
                 if run:
@@ -1756,7 +1760,10 @@ class Gen2:
                     parts.append(run.decode('ascii'))
                     run = bytearray()
                 parts.append(cls.corrupted_span_display(4))
-                segments.append(('gap', 4))
+                # A marker that is the last four bytes of the payload covers the message's NUL
+                # terminator (every undamaged message ends with one): only three message
+                # characters are lost there. 'tgap' tells the restorer so.
+                segments.append(('tgap', 3) if i + 4 == len(body) else ('gap', 4))
                 lost += 4
                 i += 4
                 continue
@@ -1796,8 +1803,10 @@ class Gen2:
         display = lead + ''.join(parts)
         parse_text = parse.decode('ascii') if parse_ok and parse else None
         result = {'display': display, 'parse_text': parse_text, 'bytes_lost': lost,
-                  'prefix_damaged': prefix_damaged, 'restored': None, 'display_restored': None}
-        if lost and board is not None and not undecoded and any(k == 'gap' for k, _ in segments):
+                  'prefix_damaged': prefix_damaged, 'restored': None, 'display_restored': None,
+                  # undamaged message in every respect: no marker, nothing undecoded, NUL terminated
+                  'intact_text': not lost and not undecoded and terminated and '\n' not in display}
+        if lost and board is not None and not undecoded and any(k in ('gap', 'tgap') for k, _ in segments):
             restored = cls._gen3_restore(segments, board)
             if restored is not None:
                 result['restored'] = restored
