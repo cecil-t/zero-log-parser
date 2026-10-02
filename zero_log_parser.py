@@ -826,8 +826,8 @@ class Gen2:
     # time) are corrupt, not dates; kept apart from real times.
     CLOCK_FUTURE_MONTHS = 30
     # Anchor rule for backfill (see assign_legacy_times), in seconds
-    ANCHOR_TOLERANCE = 60       # a first clock value this far out of line with its neighbours is an outlier
-    ANCHOR_NEIGHBOUR_WINDOW = 600   # the fallback anchor must sit this close to its neighbours
+    ANCHOR_TOLERANCE = 60       # how far a clock value may sit out of line with its neighbour before it counts as disagreeing
+    ANCHOR_AGREE_WINDOW = 600   # N agrees with N2 when N <= N2 <= N + this
 
     @staticmethod
     def utc_now():
@@ -906,20 +906,19 @@ class Gen2:
             prev_kind = k
 
         # Backfill. A is the first clock entry of a cycle that has uptime entries before
-        # it, N the next clock entry of that cycle, P the last dated entry before the
-        # cycle in log order (invalid and undated entries ignored). A is rejected as the
-        # anchor if
-        #   - N exists and A is later than N by more than ANCHOR_TOLERANCE (a future
-        #     outlier), or
-        #   - P and N exist, A is earlier than P by more than ANCHOR_TOLERANCE, and N is
-        #     not earlier than P by more than that (a past outlier whose neighbours
-        #     agree; the N versus P test keeps ring buffer wrap points from triggering it).
-        # Otherwise A anchors, whatever the forward gap (a long gap is usually parked
-        # time inside what the splitter treats as one cycle). A rejected A hands the
-        # anchor to N with the same arithmetic, but only if N lies within
-        # ANCHOR_NEIGHBOUR_WINDOW of P and of the clock entry after N (where they
-        # exist); otherwise the cycle's boot entries stay uptime. A itself stays a
-        # clock entry either way.
+        # it, N the next clock entry in that cycle, N2 the clock entry after N (in the
+        # same cycle or the next one), P the last dated entry before the cycle in log
+        # order (invalid and undated entries ignored). "N agrees with N2" means
+        # N <= N2 <= N + ANCHOR_AGREE_WINDOW, and holds when N has no N2. A is rejected
+        # as the anchor only when its neighbours agree with each other and disagree
+        # with it:
+        #   future outlier: A > N + ANCHOR_TOLERANCE, and N >= P - ANCHOR_TOLERANCE (or
+        #                   there is no P), and N agrees with N2;
+        #   past outlier:   A < P - ANCHOR_TOLERANCE, and N >= P - ANCHOR_TOLERANCE, and
+        #                   N agrees with N2 (no limit on N - P: parked time is unbounded).
+        # A rejected A hands the anchor to N with the same arithmetic. Otherwise A anchors,
+        # whatever the forward gap, and this rule never turns a boot entry into uptime.
+        # A keeps its own clock time and display either way.
         epoch = [None] * n
         source = [None] * n
         groups = {}
@@ -933,10 +932,12 @@ class Gen2:
                 epoch[i] = collected[i][1]['original_timestamp']
                 source[i] = 'clock'
         raw_of = lambda i: collected[i][1]['original_timestamp']
+        clocks_of = {c: [i for i in idx if kind[i] == 'clock'] for c, idx in groups.items()}
         last_dated = None
+        tol = cls.ANCHOR_TOLERANCE
         for c in order:
             idx = groups[c]
-            clocks = [i for i in idx if kind[i] == 'clock']
+            clocks = clocks_of[c]
             uptimes = [i for i in idx if kind[i] == 'uptime']
             for i in uptimes:
                 source[i] = 'uptime'
@@ -944,28 +945,23 @@ class Gen2:
                 first = clocks[0]
                 before = [i for i in uptimes if i < first]
                 if before:
-                    a_raw = raw_of(first)
-                    n_raw = raw_of(clocks[1]) if len(clocks) > 1 else None
-                    p = last_dated
-                    tol = cls.ANCHOR_TOLERANCE
-                    rejected = False
-                    if n_raw is not None and a_raw - n_raw > tol:
-                        rejected = True
-                    elif p is not None and n_raw is not None and a_raw < p - tol and not (n_raw < p - tol):
-                        rejected = True
                     anchor = first
-                    if rejected:
-                        near = cls.ANCHOR_NEIGHBOUR_WINDOW
-                        m_raw = raw_of(clocks[2]) if len(clocks) > 2 else None
-                        if (p is None or abs(n_raw - p) <= near) and (m_raw is None or abs(n_raw - m_raw) <= near):
-                            anchor = clocks[1]
+                    if len(clocks) > 1:
+                        a_raw, n_raw, p = raw_of(first), raw_of(clocks[1]), last_dated
+                        if len(clocks) > 2:
+                            n2 = raw_of(clocks[2])
                         else:
-                            anchor = None
+                            following = clocks_of.get(c + 1)
+                            n2 = raw_of(following[0]) if following else None
+                        n_agrees = n2 is None or n_raw <= n2 <= n_raw + cls.ANCHOR_AGREE_WINDOW
+                        future_outlier = a_raw > n_raw + tol and (p is None or n_raw >= p - tol)
+                        past_outlier = p is not None and a_raw < p - tol and n_raw >= p - tol
+                        if (future_outlier or past_outlier) and n_agrees:
+                            anchor = clocks[1]
                     last_uptime = raw_of(before[-1])
-                    if anchor is not None:
-                        for i in before:
-                            epoch[i] = raw_of(anchor) - (last_uptime - raw_of(i))
-                            source[i] = 'backfilled'
+                    for i in before:
+                        epoch[i] = raw_of(anchor) - (last_uptime - raw_of(i))
+                        source[i] = 'backfilled'
             for i in idx:
                 if epoch[i] is not None:
                     last_dated = epoch[i]

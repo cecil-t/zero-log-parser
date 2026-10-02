@@ -265,7 +265,7 @@ def test_lower_bound_is_unchanged():
     assert _sources([1_262_304_000 - 1, 1_262_304_000], FIXED_NOW) == ['backfilled', 'clock']
 
 
-# --- backfill anchor rule ---
+# --- backfill anchor rule: A is rejected only when its neighbours agree with each other and disagree with it ---
 
 def _times(raws, now=FIXED_NOW):
     es = _with_now(now, lambda: _by_number(_entries(_log(*[(r, OPEN) for r in raws]))))
@@ -278,50 +278,79 @@ def test_long_forward_gap_does_not_reject_the_anchor():
     assert t[1] == ('backfilled', T1 - 7) and t[2] == ('backfilled', T1)
 
 
-def test_future_outlier_is_rejected_and_next_clock_entry_anchors():
-    # A is two hours after its successor: N anchors, with the same arithmetic
-    n = T1 - 7200
-    t = _times([0, 4, T1, n, n + 5])
-    assert t[3] == ('clock', T1)          # A stays a clock entry
-    assert t[1] == ('backfilled', n - 4) and t[2] == ('backfilled', n)
+def test_future_outlier_with_agreeing_neighbours_is_rejected():
+    # P=T1, boot entries 0 and 4, A far ahead, N and N2 agree with each other and with P
+    t = _times([T1, 0, 4, T1 + 500, T1 + 100, T1 + 105])
+    assert t[4] == ('clock', T1 + 500)                    # A is untouched
+    # same arithmetic, on N: boot entries (raw 0 and 4) land at N - 4 and N
+    assert t[2] == ('backfilled', T1 + 96) and t[3] == ('backfilled', T1 + 100)
 
 
-def test_future_outlier_fallback_needs_n_near_its_neighbours():
-    # N is more than 10 minutes from the clock entry after it: boot entries stay uptime
-    n = T1 - 7200
-    t = _times([0, 4, T1, n, n + 2000])
-    assert t[1][0] == 'uptime' and t[2][0] == 'uptime'
-    assert t[3][0] == 'clock'
+def test_garbage_n_far_before_p_does_not_reject_a():
+    # N is an old garbage date (before P): A is kept even though it is later than N
+    t = _times([T1, 0, 4, T1 + 500, T1 - 100_000, T1 - 99_995])
+    assert t[3] == ('backfilled', T1 + 500) and t[2] == ('backfilled', T1 + 496)
+
+
+def test_garbage_n_between_p_and_a_after_parking_does_not_reject_a():
+    # parked for ten days: N is a garbage value between P and the correct A, N2 does not follow N
+    d10, d5 = 10 * 86400, 5 * 86400
+    t = _times([T1, 0, 4, T1 + d10, T1 + d5, T1 + d10 + 5])
+    assert t[3] == ('backfilled', T1 + d10)
+
+
+def test_rejection_needs_n_to_agree_with_n2():
+    # A later than N, N after P, but N2 is earlier than N: no vote, A kept
+    t = _times([T1, 0, 4, T1 + 500, T1 + 100, T1 + 50])
+    assert t[3] == ('backfilled', T1 + 500)
+
+
+def test_n2_in_the_next_cycle_counts():
+    # the cycle's own clock values are A and N; N2 is the first clock entry of the next cycle
+    t = _times([T1, 0, 4, T1 + 500, T1 + 100, 0, 3, T1 + 105])
+    assert t[3] == ('backfilled', T1 + 100)
+    # same, but the next cycle's clock value disagrees with N
+    t = _times([T1, 0, 4, T1 + 500, T1 + 100, 0, 3, T1 + 50])
+    assert t[3] == ('backfilled', T1 + 500)
+
+
+def test_a_without_n2_is_decided_by_n_alone():
+    t = _times([T1, 0, 4, T1 + 500, T1 + 100])
+    assert t[3] == ('backfilled', T1 + 100)
 
 
 def test_within_sixty_seconds_is_not_an_outlier():
-    t = _times([0, 4, T1 + 60, T1, T1 + 5])      # A later than N by exactly 60 s: kept
-    assert t[1][0] == 'backfilled' and t[2] == ('backfilled', T1 + 60)
+    t = _times([T1, 0, 4, T1 + 160, T1 + 100, T1 + 105])    # A later than N by exactly 60 s
+    assert t[3] == ('backfilled', T1 + 160)
 
 
-def test_past_outlier_with_agreeing_neighbours_is_rejected():
-    # previous cycle ends at T1 + 1000; A is 500 s earlier; N agrees with P
+def test_past_outlier_is_rejected_whatever_the_gap_between_n_and_p():
     p = T1 + 1000
-    t = _times([T1, p, 0, 3, p - 500, p + 100, p + 105])
+    # previous cycle ends at p; A is 500 s earlier; N is three days after p (parking), N2 follows N
+    n = p + 3 * 86400
+    t = _times([T1, p, 0, 3, p - 500, n, n + 5])
+    assert t[4] == ('backfilled', n) and t[3] == ('backfilled', n - 3)
     assert t[5] == ('clock', p - 500)
-    # N (p + 100) is within 10 minutes of P and of M (p + 105): N anchors
-    assert t[4] == ('backfilled', p + 100)
-    assert t[3] == ('backfilled', p + 100 - 3)
 
 
-def test_past_step_where_n_also_stepped_back_is_a_wrap_not_an_outlier():
-    # P = T1 + 1000, A and N both well before P (a ring buffer wrap or a clock reset): A kept
+def test_past_step_where_n_is_also_before_p_is_a_wrap_not_an_outlier():
     p = T1 + 1000
     t = _times([T1, p, 0, 3, T1 - 5000, T1 - 4990, T1 - 4980])
-    assert t[4][1] == T1 - 5000 and t[3][1] == T1 - 5000 - 3
+    assert t[4] == ('backfilled', T1 - 5000)
 
 
 def test_single_clock_entry_keeps_its_anchor():
-    t = _times([T1, T1 + 5, 0, 3, T1 - 90000])     # A earlier than P by a day, but no N
-    assert t[4][1] == T1 - 90000 and t[3][0] == 'backfilled'
+    t = _times([T1, T1 + 5, 0, 3, T1 - 90000])
+    assert t[4] == ('backfilled', T1 - 90000)
+
+
+def test_rejection_never_turns_boot_entries_into_uptime():
+    # N is far from every neighbour; the old fallback would have left uptime
+    n = T1 + 100
+    t = _times([T1, 0, 4, T1 + 500, n, n + 5, n + 4000])
+    assert t[3][0] == 'backfilled' and t[2][0] == 'backfilled'
 
 
 def test_rejected_a_is_still_displayed_as_decoded():
-    n = T1 - 7200
-    es = _with_now(FIXED_NOW, lambda: _by_number(_entries(_log((0, OPEN), (4, CLOSE), (T1, REG), (n, OPEN), (n + 5, CLOSE)))))
-    assert es[3]['timestamp'] == time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(T1)) and es[3]['time_source'] == 'clock'
+    es = _with_now(FIXED_NOW, lambda: _by_number(_entries(_log((T1, OPEN), (0, OPEN), (4, CLOSE), (T1 + 500, REG), (T1 + 100, OPEN), (T1 + 105, CLOSE)))))
+    assert es[4]['timestamp'] == time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(T1 + 500)) and es[4]['time_source'] == 'clock'
