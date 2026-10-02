@@ -89,6 +89,14 @@ class ProcessedLogEntry:
     has_structured_data: bool = False
     message_type: str = "unknown"
     original_timestamp: Optional[str] = None  # Raw timestamp before interpolation
+    # Gen3 text restored from the shipped template table (see Gen2.gen3_text_message)
+    text_restored: bool = False
+    restored_spans: Optional[list] = None      # [{offset, length, text}], offsets into the restored message
+    restoration_kind: Optional[str] = None     # "strict" or "parameterized"
+    restoration_reading: Optional[str] = None  # "overwrite" or "inserted"
+    template_id: Optional[str] = None
+    event_as_read: Optional[str] = None        # the line with its original corrupted span
+    event_has_newline: bool = False            # a newline inside the message: shown as " | " in text and tabular output
 
     def __eq__(self, other):
         """
@@ -1471,8 +1479,194 @@ class Gen2:
         ('precharge', re.compile(r'Precharge: (\d+)%')),
     )
 
+    # --- Restoration of page-marker-damaged Gen3 text from a fixed table of known messages.
+    # The table (gen3_text_templates.json next to this file) is built offline from messages seen
+    # intact in at least two different files (tools/build_gen3_text_templates.py) and shipped with
+    # the parser; it is never consulted outside this one file. A damaged line is restored only
+    # when exactly one template matches every surviving byte, under exactly one reading of the
+    # marker (it overwrote four characters, or it was inserted and nothing was lost), and every lost
+    # character falls in fixed text, never inside a variable number. Anything else stays as read.
+    GEN3_TEXT_TEMPLATES_FILE = 'gen3_text_templates.json'
+    GEN3_TEXT_TEMPLATE_BOARDS = ('BMS', 'MBB')
+    # Test and tooling seam: when set, called with each rendered Gen3 text entry (the dict
+    # gen3_text_message returns), whether or not it was restored.
+    gen3_text_observer = None
+    _gen3_text_index_cache = {}
+    _gen3_restore_cache = {}
+
     @classmethod
-    def gen3_text_message(cls, x):
+    def gen3_text_index(cls, templates):
+        """Index a list of template dicts (the JSON table's entries) for matching."""
+        index = []
+        for t in templates:
+            toks = []
+            for tk in t['t']:
+                toks.append(('lit', tk[1]) if tk[0] == 'lit' else ('slot', tk[0], int(tk[1]), int(tk[2])))
+            toks = tuple(toks)
+            lo = hi = 0
+            for tk in toks:
+                if tk[0] == 'lit':
+                    lo += len(tk[1]); hi += len(tk[1])
+                else:
+                    lo += tk[2]; hi += tk[3]
+            skeleton = ''.join(tk[1] if tk[0] == 'lit' else '#' for tk in toks)
+            skeleton = re.sub(r'#+', '#', re.sub(r'\d+', '#', skeleton))
+            index.append({'id': t['id'], 'tokens': toks, 'lo': lo, 'hi': hi, 'skeleton': skeleton,
+                          'kind': 'parameterized' if any(tk[0] == 'slot' for tk in toks) else 'strict'})
+        return index
+
+    @classmethod
+    def _gen3_text_templates(cls, board):
+        """Indexed templates for a board ('BMS' or 'MBB'), or for an unknown board both boards'
+        templates together; [] when the table is missing or the board is not Gen3 text capable."""
+        key = board if board in cls.GEN3_TEXT_TEMPLATE_BOARDS else (
+            'ALL' if board == LogFile.log_type_unknown else None)
+        if key is None:
+            return []
+        if key not in cls._gen3_text_index_cache:
+            table = {}
+            try:
+                path = os.path.join(os.path.dirname(os.path.abspath(__file__)), cls.GEN3_TEXT_TEMPLATES_FILE)
+                with open(path, encoding='utf-8') as f:
+                    table = json.load(f).get('boards', {})
+            except (OSError, ValueError):
+                table = {}
+            boards = cls.GEN3_TEXT_TEMPLATE_BOARDS if key == 'ALL' else (key,)
+            cls._gen3_text_index_cache[key] = cls.gen3_text_index(
+                [t for b in boards for t in table.get(b, [])])
+        return cls._gen3_text_index_cache[key]
+
+    _GEN3_SLOT_CHARS = {'N': frozenset('0123456789.-'), 'H': frozenset('0123456789abcdefABCDEFx')}
+
+    @classmethod
+    def _gen3_template_match(cls, tokens, pattern, want_text=False):
+        """Match template tokens against a pattern of known characters and None (unknown). Returns
+        the set of flags over all alignments: False = no unknown character falls inside a variable
+        slot, True = at least one does. Empty set: no match. With want_text, returns the restored
+        string for an alignment with no unknown character in a slot, else None."""
+        n = len(pattern)
+        tcount = len(tokens)
+        memo = {}
+        slot_chars = cls._GEN3_SLOT_CHARS
+
+        def go(ti, pos):
+            key = (ti, pos)
+            if key in memo:
+                return memo[key]
+            if ti == tcount:
+                res = (frozenset((False,)) if pos == n else frozenset()) if not want_text else ('' if pos == n else None)
+            else:
+                tk = tokens[ti]
+                if tk[0] == 'lit':
+                    lit = tk[1]
+                    end = pos + len(lit)
+                    ok = end <= n
+                    if ok:
+                        for k, ch in enumerate(lit):
+                            c = pattern[pos + k]
+                            if c is not None and c != ch:
+                                ok = False
+                                break
+                    if not ok:
+                        res = frozenset() if not want_text else None
+                    else:
+                        rest = go(ti + 1, end)
+                        res = rest if not want_text else (None if rest is None else lit + rest)
+                else:
+                    chars = slot_chars[tk[1]]
+                    found = set()
+                    text = None
+                    used = False
+                    for k in range(1, tk[3] + 1):
+                        if pos + k > n:
+                            break
+                        c = pattern[pos + k - 1]
+                        if c is None:
+                            used = True
+                            if want_text:
+                                break
+                        elif c not in chars:
+                            break
+                        if k >= tk[2]:
+                            rest = go(ti + 1, pos + k)
+                            if want_text:
+                                if rest is not None:
+                                    text = ''.join(pattern[pos:pos + k]) + rest
+                                    break
+                            else:
+                                for f in rest:
+                                    found.add(f or used)
+                    res = text if want_text else frozenset(found)
+            memo[key] = res
+            return res
+        return go(0, 0)
+
+    @classmethod
+    def _gen3_restore(cls, segments, board):
+        """segments: ('t', text) and ('gap', n) pieces of a marker-damaged line. Returns None, or a
+        dict(text, spans, kind, template_id, reading) for a restoration the rule allows."""
+        templates = cls._gen3_text_templates(board)
+        if not templates:
+            return None
+        cache_key = (board if board in cls.GEN3_TEXT_TEMPLATE_BOARDS else 'ALL', tuple(segments))
+        cache = cls._gen3_restore_cache
+        if cache_key in cache:
+            return cache[cache_key]
+        over, ins = [], []
+        lead_gap = bool(segments and segments[0][0] == 'gap' and segments[0][1] < 4)
+        inner_gaps = 0
+        for idx, (kind, val) in enumerate(segments):
+            if kind == 't':
+                over.extend(val)
+                ins.extend(val)
+            else:
+                over.extend([None] * val)
+                if not (idx == 0 and lead_gap):
+                    inner_gaps += 1
+        readings = [('overwrite', over)]
+        if inner_gaps and not lead_gap:
+            readings.append(('inserted', ins))
+        longest = max((v for k, v in segments if k == 't'), default='')
+        key = re.sub(r'#+', '#', re.sub(r'\d+', '#', longest))
+        hits = {}
+        for name, pat in readings:
+            n = len(pat)
+            for i, t in enumerate(templates):
+                if not (t['lo'] <= n <= t['hi']):
+                    continue
+                if len(key) >= 4 and key not in t['skeleton']:
+                    continue
+                flags = cls._gen3_template_match(t['tokens'], tuple(pat))
+                if flags:
+                    hits.setdefault(i, []).extend((name, f) for f in flags)
+        result = None
+        if len(hits) == 1:
+            i, flags = next(iter(hits.items()))
+            names = {nm for nm, _ in flags}
+            if len(names) == 1 and not any(f for _, f in flags):
+                name = next(iter(names))
+                pat = dict(readings)[name]
+                text = cls._gen3_template_match(templates[i]['tokens'], tuple(pat), want_text=True)
+                if text is not None:
+                    spans, off_src, off_out = [], 0, 0
+                    for idx, (kind, val) in enumerate(segments):
+                        if kind == 't':
+                            off_src += len(val)
+                            off_out += len(val)
+                        elif name == 'overwrite':
+                            spans.append({'offset': off_out, 'length': val, 'text': text[off_out:off_out + val]})
+                            off_out += val
+                        else:
+                            spans.append({'offset': off_out, 'length': 0, 'text': ''})
+                    result = {'text': text, 'spans': spans, 'kind': templates[i]['kind'],
+                              'template_id': templates[i]['id'], 'reading': name}
+        if len(cache) > 20000:
+            cache.clear()
+        cache[cache_key] = result
+        return result
+
+    @classmethod
+    def gen3_text_message(cls, x, board=None):
         """The one place that turns a Gen3 (FST) 0xFD payload into text; used by
         both gen3_debug_message() (the visible event) and gen3_text_event()
         (structured numbers) so they cannot drift apart. Only called for
@@ -1486,20 +1680,33 @@ class Gen2:
         bytes replaced and 3,302 an inserted marker; the rest cannot be
         checked), so deleting it would show wrong text. The visible text
         therefore carries the project's corrupted-span tag, "{corrupted: N
-        bytes lost}", where each marker was. Bytes that are not printable
-        ASCII (damaged tails) are shown as an undecoded-hex tag, never
-        guessed at.
+        bytes lost}", where each marker was, unless the line can be restored
+        from the shipped template table (see gen3_text_templates.json), in which
+        case "display_restored" carries "{restored: <text>}" in its place. Bytes
+        that are not printable ASCII (damaged tails) are shown as an
+        undecoded-hex tag, never guessed at. A newline (0x0a) at the end of the
+        message is dropped; one inside the message is kept as a newline
+        character (the text and tabular writers show it as " | ").
+
+        board ('BMS', 'MBB', LogFile.log_type_unknown or None) selects the
+        template table; None (a direct call) never restores.
 
         Returns a dict, or None when the payload is not a Gen3 text entry this
         helper can read (too short, plain text with no prefix, or a prefix that
         fails the gate with no marker to explain it; the caller then uses the
         legacy decoder unchanged):
-          display       text for the event, markers and odd bytes tagged
+          display       text for the event as read, markers and odd bytes tagged
           parse_text    the message with each marker simply removed (the form
                         gen3_text_event() has always matched against), or None
                         if it holds a non-printable byte
           bytes_lost    bytes the marker(s) destroyed inside the message
           prefix_damaged  True when the marker overlapped the 6-byte prefix
+          restored      None, or dict(text, spans, kind, template_id, reading):
+                        the restored message, the restored spans (offset, length,
+                        text), strict or parameterized, the template id, and the
+                        marker reading used
+          display_restored  display with each corrupted span replaced by the
+                        restored text, or None when not restored
         """
         marker = cls.PAGE_MARKER
         if len(x) <= 6:
@@ -1508,6 +1715,7 @@ class Gen2:
         prefix_damaged = False
         lost = 0
         lead = ''
+        segments = []
         gate_failed = BinaryTools.unpack('uint32', x, 0) > cls.FST_SUBSECOND_MAX_US
         if gate_failed and all(0x20 <= b <= 0x7e for b in bytes(x[:4])):
             # log_version REV3 also covers legacy-platform ring-buffer files
@@ -1533,18 +1741,22 @@ class Gen2:
                 start = at + 4
                 lost = at + 4 - 6
                 lead = cls.corrupted_span_display(lost)
+                segments.append(('gap', lost))
         body = bytes(x[start:])
         parts = []
         parse = bytearray()
         i = 0
         run = bytearray()
         parse_ok = True
+        undecoded = False
         while i < len(body):
             if body[i:i + 4] == marker:
                 if run:
+                    segments.append(('t', run.decode('ascii')))
                     parts.append(run.decode('ascii'))
                     run = bytearray()
                 parts.append(cls.corrupted_span_display(4))
+                segments.append(('gap', 4))
                 lost += 4
                 i += 4
                 continue
@@ -1555,9 +1767,22 @@ class Gen2:
                 parse.append(body[i])
                 i += 1
                 continue
+            if body[i] == 0x0a:
+                j = i
+                while j < len(body) and body[j] == 0x0a:
+                    j += 1
+                if j >= len(body) or body[j] == 0:
+                    i = j                      # trailing newline(s): dropped
+                    continue
+                run.extend(body[i:j])          # a newline inside the message: kept
+                parse_ok = False
+                i = j
+                continue
             # a damaged tail: show the rest of the message as undecoded bytes
             parse_ok = False
+            undecoded = True
             if run:
+                segments.append(('t', run.decode('ascii')))
                 parts.append(run.decode('ascii'))
                 run = bytearray()
             j = i
@@ -1566,19 +1791,54 @@ class Gen2:
             parts.append(cls.undecoded_hex_display(body[i:j]))
             i = j
         if run:
+            segments.append(('t', run.decode('ascii')))
             parts.append(run.decode('ascii'))
         display = lead + ''.join(parts)
         parse_text = parse.decode('ascii') if parse_ok and parse else None
-        return {'display': display, 'parse_text': parse_text, 'bytes_lost': lost,
-                'prefix_damaged': prefix_damaged}
+        result = {'display': display, 'parse_text': parse_text, 'bytes_lost': lost,
+                  'prefix_damaged': prefix_damaged, 'restored': None, 'display_restored': None}
+        if lost and board is not None and not undecoded and any(k == 'gap' for k, _ in segments):
+            restored = cls._gen3_restore(segments, board)
+            if restored is not None:
+                result['restored'] = restored
+                out, off = [], 0
+                spans = iter(restored['spans'])
+                for kind, val in segments:
+                    if kind == 't':
+                        out.append(val)
+                    else:
+                        sp = next(spans)
+                        out.append('{restored: %s}' % sp['text'] if sp['length'] else '')
+                result['display_restored'] = ''.join(out)
+        if cls.gen3_text_observer is not None:
+            cls.gen3_text_observer(result, segments, board)
+        return result
 
     @classmethod
-    def gen3_debug_message(cls, x):
+    def gen3_debug_message(cls, x, board=None):
         """Types 0xFD on the FST path: the message after the 6-byte prefix, with
-        the same content-based handling as the legacy debug_message()."""
-        rendered = cls.gen3_text_message(x)
+        the same content-based handling as the legacy debug_message(). board
+        selects the restoration table (see gen3_text_message)."""
+        rendered = cls.gen3_text_message(x, board)
         if rendered is None:
             return cls.debug_message(x)
+        restored = rendered['restored']
+        if restored is not None:
+            structured = cls._gen3_text_structured(restored['text'])
+            if structured is not None:
+                structured = dict(structured)
+                structured['from_restored_text'] = True
+            entry = cls._debug_text_entry(rendered['display_restored'], structured)
+            entry['text_restored'] = True
+            entry['restored_spans'] = restored['spans']
+            entry['restoration_kind'] = restored['kind']
+            entry['restoration_reading'] = restored['reading']
+            entry['template_id'] = restored['template_id']
+            # the line as the unrestored decoder shows it (same prefix handling), original corrupted span included
+            entry['event_as_read'] = cls._debug_text_entry(rendered['display'], None)['event']
+            if '\n' in entry['event']:
+                entry['event_has_newline'] = True
+            return entry
         structured = cls._gen3_text_structured(rendered['parse_text'])
         entry = cls._debug_text_entry(rendered['display'], structured)
         if rendered['bytes_lost'] and not any(c.isalnum() for c in re.sub(r'\{[^}]*\}', '', rendered['display'])):
@@ -1588,15 +1848,26 @@ class Gen2:
             cls.mark_bytes_corrupted(sd, rendered['bytes_lost'])
             entry['structured_data'] = sd
             entry['log_level'] = entry.get('log_level') or 'WARNING'
+        if '\n' in entry['event']:
+            entry['event_has_newline'] = True
         return entry
 
     @classmethod
-    def gen3_text_event(cls, x):
+    def gen3_text_event(cls, x, board=None):
         """Structured numbers from a Gen3 0xFD text entry, or None. See
-        gen3_text_message() for the text handling."""
-        rendered = cls.gen3_text_message(x)
+        gen3_text_message() for the text handling. A line restored from the
+        template table is parsed from the restored text and the result carries
+        from_restored_text."""
+        rendered = cls.gen3_text_message(x, board)
         if rendered is None:
             return None
+        if rendered['restored'] is not None:
+            data = cls._gen3_text_structured(rendered['restored']['text'])
+            if data is None:
+                return None
+            data = dict(data)
+            data['from_restored_text'] = True
+            return data
         return cls._gen3_text_structured(rendered['parse_text'])
 
     @classmethod
@@ -2932,7 +3203,7 @@ class Gen2:
             (38, 39, 'field', 'bms_report_mode'),
             (39, 42, 'field', 'pack_voltage_volts'),
             (42, 43, 'reserved', 'constant 0x00 in all 38405 marker-free accepted entries'),
-            (43, 45, 'unknown', 'not understood yet'),
+            (43, 45, 'unknown', 'two bytes, each 0 to 27 (a 28-cell range), identity not established'),
         ),
         (0x4b, 46): (
             (0, 4, 'field', 'subsecond_us'),
@@ -2999,7 +3270,7 @@ class Gen2:
             (42, 43, 'field', 'bms_report_mode'),
             (43, 46, 'field', 'pack_voltage_volts'),
             (46, 47, 'reserved', 'constant 0x00 in all 2638 marker-free accepted entries'),
-            (47, 49, 'unknown', 'not understood yet'),
+            (47, 49, 'unknown', 'two bytes, each 0 to 27 (a 28-cell range), identity not established'),
             (49, 50, 'field', 'cell_temperature_coldest_c'),
             (50, 51, 'field', 'cell_temperature_hottest_c'),
             (51, 54, 'unknown', 'not understood yet'),
@@ -3072,7 +3343,7 @@ class Gen2:
             (61, 62, 'reserved', 'constant 0x00 in all 9334 marker-free accepted entries'),
             (62, 65, 'unknown', 'not understood yet'),
             (65, 68, 'field', 'full_charge_capacity_twin_ah'),
-            (68, 69, 'unknown', 'not understood yet'),
+            (68, 69, 'reserved', 'constant 0x00 in all 9214 of 17911 entries that no page marker (whole, or its first 2-3 bytes at the end of the payload) or 0xff erase fill touches; every other value is such damage'),
         ),
         (0x4d, 71): (
             (0, 4, 'field', 'subsecond_us'),
@@ -3096,7 +3367,7 @@ class Gen2:
             (46, 47, 'field', 'bms_report_mode'),
             (47, 50, 'field', 'pack_voltage_volts'),
             (50, 51, 'reserved', 'constant 0x00 in all 6421 marker-free accepted entries'),
-            (51, 53, 'unknown', 'not understood yet'),
+            (51, 53, 'unknown', 'two bytes, each 0 to 27 (a 28-cell range), identity not established'),
             (53, 54, 'field', 'cell_temperature_coldest_c'),
             (54, 55, 'field', 'cell_temperature_hottest_c'),
             (55, 58, 'unknown', 'not understood yet'),
@@ -4273,7 +4544,7 @@ class Gen2:
             # FST path only (log_version REV3): the payload of a 0xFD entry
             # starts with the shared 6-byte prefix, so the message is not at
             # byte 0. Legacy files keep debug_message() untouched.
-            parsers[0xfd] = cls.gen3_debug_message
+            parsers[0xfd] = lambda m: cls.gen3_debug_message(m, log_type)
         if log_type == LogFile.log_type_mbb:
             parsers[0x10] = cls.mbb_throttle_enable_wire_disable
             parsers[0x11] = cls.mbb_throttle_enable_wire_reenable
@@ -4605,7 +4876,10 @@ class Gen2:
                 entry = cls.unhandled_entry_format(message_type, message)
                 entry['event'] = 'Exception caught: ' + entry['event']
 
-            if entry_parser and entry.get('structured_data') is not None:
+            if entry_parser and entry.get('structured_data') is not None and not entry.get('text_restored'):
+                # (a line restored from the template table takes its structured numbers from the
+                # surviving digits of the restored text, not from marker-overwritten bytes, so the
+                # contamination probe does not apply to it)
                 cls._withhold_marker_corrupted_fields(
                     entry['structured_data'], entry_parser, buf, start, start + length, message_type)
 
@@ -5078,7 +5352,14 @@ class LogData(object):
                     structured_data=structured_data,
                     has_structured_data=has_json_data,
                     message_type=message_type,
-                    original_timestamp=str(entry_payload.get('original_timestamp', ''))
+                    original_timestamp=str(entry_payload.get('original_timestamp', '')),
+                    text_restored=bool(entry_payload.get('text_restored')),
+                    restored_spans=entry_payload.get('restored_spans'),
+                    restoration_kind=entry_payload.get('restoration_kind'),
+                    restoration_reading=entry_payload.get('restoration_reading'),
+                    template_id=entry_payload.get('template_id'),
+                    event_as_read=entry_payload.get('event_as_read'),
+                    event_has_newline=bool(entry_payload.get('event_has_newline'))
                 )
                 processed_entries.append(processed_entry)
 
@@ -5680,6 +5961,12 @@ class LogData(object):
     def has_official_output_reference(self):
         return self.log_version < REV2 or self.log_version == REV3
 
+    @staticmethod
+    def _event_text(entry):
+        """The event as the text and tabular writers show it: a newline inside a Gen3 text message
+        becomes " | " so the entry stays on one line (JSON keeps the real newline)."""
+        return entry.event.replace('\n', ' | ') if entry.event_has_newline else entry.event
+
     def emit_tabular_decoding(self, output_file: str, out_format='tsv', logger=None, start_time=None, end_time=None, unnest=False):
         file_suffix = '.tsv' if out_format == 'tsv' else '.csv'
         tabular_output_file = output_file.replace('.txt', file_suffix, 1)
@@ -5712,7 +5999,7 @@ class LogData(object):
                             str(entry.entry_number),
                             entry.timestamp,
                             entry.log_level,
-                            entry.event,
+                            self._event_text(entry),
                             key,
                             # Not str(value): print_value_tabular() already
                             # documents that it renders None as an empty
@@ -5740,7 +6027,7 @@ class LogData(object):
                             str(entry.entry_number),
                             entry.timestamp,
                             entry.log_level,
-                            entry.event,
+                            self._event_text(entry),
                             '',  # condition_key
                             entry.conditions,  # condition_value (original conditions text)
                             entry.uninterpreted
@@ -5755,7 +6042,7 @@ class LogData(object):
                             str(entry.entry_number),
                             entry.timestamp,
                             entry.log_level,
-                            entry.event,
+                            self._event_text(entry),
                             conditions_output,
                             entry.uninterpreted
                         ]
@@ -5826,6 +6113,15 @@ class LogData(object):
             # Add structured data if available
             if entry.structured_data:
                 json_entry['structured_data'] = entry.structured_data
+
+            # Gen3 text restored from the template table: additive fields, only on those entries
+            if entry.text_restored:
+                json_entry['text_restored'] = True
+                json_entry['restored_spans'] = entry.restored_spans
+                json_entry['restoration_kind'] = entry.restoration_kind
+                json_entry['restoration_reading'] = entry.restoration_reading
+                json_entry['template_id'] = entry.template_id
+                json_entry['event_as_read'] = entry.event_as_read
 
             json_output['entries'].append(json_entry)
 
@@ -6000,21 +6296,21 @@ class LogData(object):
                         conditions_display = '???'
                         write_line(
                             line_prefix + '   {message} {conditions}'.format(
-                                message=entry.event, conditions=conditions_display))
+                                message=self._event_text(entry), conditions=conditions_display))
                     else:
                         write_line(
                             line_prefix + '   {message:25}  {conditions}'.format(
-                                message=entry.event, conditions=conditions_display))
+                                message=self._event_text(entry), conditions=conditions_display))
                 elif entry.uninterpreted:
                     # Handle Gen3 format with uninterpreted field
                     output_line = line_prefix + '   {event} [{uninterpreted}]'.format(
-                        event=entry.event,
+                        event=self._event_text(entry),
                         uninterpreted=entry.uninterpreted)
                     if re.match(r'\s+\[', output_line):
                         raise ValueError()
                     write_line(output_line)
                 else:
-                    write_line(line_prefix + '   {message}'.format(message=entry.event))
+                    write_line(line_prefix + '   {message}'.format(message=self._event_text(entry)))
 
             write_line()
 

@@ -101,6 +101,27 @@ Each log entry follows this structure:
 | `is_structured_data` | Boolean indicating if structured_data field is present |
 | `structured_data` | Object containing parsed sensor data (when available) |
 
+### Restored Gen3 text
+
+On Gen3 (FST) BMS logs the 128-byte page marker overwrites four characters of a text message wherever it lands, which the decoder shows as `{corrupted: 4 bytes lost}`. When the damaged line matches exactly one message in the shipped table of known messages (`gen3_text_templates.json`, built from messages seen intact in at least two files; `tools/build_gen3_text_templates.py`), and every lost character falls in fixed text (never inside a variable number), the line is restored. The decoder uses only that table and the one file it is reading. A line that is ambiguous, whose lost bytes fall inside a number, or that matches no message stays damaged, unchanged.
+
+In the text output the span becomes `{restored: <the restored characters>}`, for example `Latching 12{restored: V Ou}tput ON, lowest cell:4054mv`. In JSON the `event` holds that text and these additive fields appear on restored entries only:
+
+| Field | Description |
+|---|---|
+| `text_restored` | `true` |
+| `restored_spans` | `[{"offset", "length", "text"}]`, offsets into the restored message, in characters |
+| `restoration_kind` | `strict` (an exact fixed message) or `parameterized` (a message with variable numbers) |
+| `restoration_reading` | `overwrite` (the marker replaced four characters) or `inserted` (nothing was lost; no span text, the event shows the message without a tag) |
+| `template_id` | the id of the template in the table (`B...` BMS, `M...` MBB) |
+| `event_as_read` | the line as decoded without restoration, with its original corrupted span |
+
+`structured_data` parsed from a restored line comes from the restored text and carries `from_restored_text: true`. Restored entries keep their `{corrupted: ...}` information only in `event_as_read`; `bytes_corrupted` is unchanged (it is set only when a whole message was destroyed, which is never restorable).
+
+### Newlines in Gen3 text
+
+A newline (0x0a) at the end of a Gen3 text message is dropped. A newline inside the message is kept: the JSON `event` holds a real newline, and the text, TSV and CSV output show it as ` | ` so the entry stays on one line. A newline followed by other unreadable bytes, and erased 0xaa or 0xff runs, are still shown as `{undecoded hex: ...}`.
+
 ## Output Format Differences
 
 The parser supports multiple output formats, each handling structured data differently:

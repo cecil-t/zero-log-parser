@@ -10,7 +10,7 @@ Usage:
     python tools/coverage_audit.py run    --corpus DIR --db audit.sqlite3 [--workers 6]
     python tools/coverage_audit.py report --db audit.sqlite3 [--dedup]
 
-Entry classes, five mutually exclusive, per entry, in this order:
+Entry classes, six mutually exclusive, per entry, in this order:
   corrupted  structured_data has bytes_corrupted, or the type is CORRUPTED
   unknown    the entry's type id has no decoder for that file type
   partial    (a) the entry's declared byte layout (Gen2.payload_layout) has at least one unknown byte,
@@ -25,7 +25,12 @@ Entry classes, five mutually exclusive, per entry, in this order:
              entry with an inline {corrupted: ...} tag, or a binary entry with a non-empty
              corrupted_fields list. Nothing is left to decode. The overlap (partial and damaged) is
              counted as partial and stored in damaged_partial_overlap_entries.
-  full       everything else. Decoders without raw_hex and without a layout default to full.
+  restored   otherwise fully decoded, and every marker-damaged span in the entry was restored from the
+             shipped template table (Gen2.gen3_text_message; entry.text_restored). The bytes did not come
+             from the file, so restored is kept apart from full. An entry with undecoded work left is
+             still partial; an entry with any marker damage left unrestored is damaged.
+  full       everything else, which means every byte came from the file. Decoders without raw_hex and
+             without a layout default to full.
   The earlier classifier called an entry partial whenever structured_data held a raw_hex key; that
   counts transparency copies as undecoded and is kept only as the 'rawhex_partial' counter.
 
@@ -66,7 +71,7 @@ COLUMNS = (
     'route_note', 'log_version', 'vin', 'model', 'board_rev', 'firmware_rev', 'bms_serial', 'pack_serial',
     'header_complete', 'total_entries', 'corrupted_entries', 'unknown_type_entries',
     'partially_decoded_entries', 'fully_decoded_entries', 'rawhex_partial_entries',
-    'damaged_entries', 'damaged_partial_overlap_entries',
+    'damaged_entries', 'damaged_partial_overlap_entries', 'restored_entries',
     'partial_breakdown_json', 'layout_bytes_json', 'hist_json', 'unknown_type_counts_json',
 )
 
@@ -162,7 +167,7 @@ def process_one(path):
 
         registered = set(Gen2._entry_parsers(dispatch).keys())
         unknown_counts, breakdown, layout_bytes, hist = {}, {}, {}, {}
-        corrupted = unknown = partial = full = rawhex_partial = damaged = overlap = 0
+        corrupted = unknown = partial = full = rawhex_partial = damaged = overlap = restored = 0
         for e in entries:
             mt, sd = e.message_type, e.structured_data
             if (sd and sd.get('bytes_corrupted')) or mt == 'CORRUPTED':
@@ -218,18 +223,21 @@ def process_one(path):
                     is_damaged = True
                 elif '{undecoded hex:' in ev and reason is None:
                     reason = 'text with undecoded bytes not from a page marker'
-            if reason:
+            klass = final_class(reason, is_damaged, getattr(e, 'text_restored', False))
+            if klass == 'partial':
                 partial += 1
                 breakdown[reason] = breakdown.get(reason, 0) + 1
                 if is_damaged:
                     overlap += 1
-            elif is_damaged:
+            elif klass == 'damaged':
                 damaged += 1
+            elif klass == 'restored':
+                restored += 1
             else:
                 full += 1
         res.update(total_entries=len(entries), corrupted_entries=corrupted, unknown_type_entries=unknown,
                    partially_decoded_entries=partial, fully_decoded_entries=full, rawhex_partial_entries=rawhex_partial,
-                   damaged_entries=damaged, damaged_partial_overlap_entries=overlap,
+                   damaged_entries=damaged, damaged_partial_overlap_entries=overlap, restored_entries=restored,
                    partial_breakdown_json=json.dumps(breakdown), layout_bytes_json=json.dumps(layout_bytes),
                    hist_json=json.dumps(hist), unknown_type_counts_json=json.dumps(unknown_counts),
                    status='ok' if bucket is not None else 'unclassified')
@@ -237,6 +245,19 @@ def process_one(path):
         res['status'] = 'garbage'
         res['error'] = f'{type(exc).__name__}: {exc}'
     return res
+
+
+def final_class(reason, is_damaged, restored):
+    """The last three steps of the class order, for an entry that is not corrupted and not of unknown
+    type: partial (undecoded work left, wins over everything below), damaged (some marker damage not
+    restored), restored (all marker damage restored and nothing else left), full."""
+    if reason:
+        return 'partial'
+    if is_damaged:
+        return 'damaged'
+    if restored:
+        return 'restored'
+    return 'full'
 
 
 def _hex_ok(mt):
@@ -290,7 +311,7 @@ def build_report(db, dedup=False):
     for r in rows:
         g = GROUPS[r['bucket']]
         a = agg.setdefault(g, dict(files=0, entries=0, full=0, partial=0, unknown=0, corrupted=0, header=0,
-                                   damaged=0, overlap=0, rawhex=0, bd={}, lb={}, hist={}))
+                                   damaged=0, overlap=0, restored=0, rawhex=0, bd={}, lb={}, hist={}))
         a['files'] += 1
         a['entries'] += r['total_entries']
         a['full'] += r['fully_decoded_entries']
@@ -302,6 +323,7 @@ def build_report(db, dedup=False):
         keys = r.keys()
         a['damaged'] += (r['damaged_entries'] or 0) if 'damaged_entries' in keys else 0
         a['overlap'] += (r['damaged_partial_overlap_entries'] or 0) if 'damaged_partial_overlap_entries' in keys else 0
+        a['restored'] += (r['restored_entries'] or 0) if 'restored_entries' in keys else 0
         for k, v in json.loads(r['partial_breakdown_json'] or '{}').items():
             a['bd'][k] = a['bd'].get(k, 0) + v
         for k, v in json.loads(r['layout_bytes_json'] or '{}').items():
@@ -340,8 +362,8 @@ def varying_decoded_share(a, layouts):
 def cmd_report(args):
     import zero_log_parser as zlp
     agg = build_report(args.db, args.dedup)
-    print('| row | files | entries | full % | partial % | damaged % | unknown % | corrupted % | header % | payload bytes decoded % | varying bytes decoded % | partial and damaged (counted partial) |')
-    print('|---|---|---|---|---|---|---|---|---|---|---|---|')
+    print('| row | files | entries | full % | partial % | damaged % | restored % | unknown % | corrupted % | header % | payload bytes decoded % | varying bytes decoded % | partial and damaged (counted partial) |')
+    print('|---|---|---|---|---|---|---|---|---|---|---|---|---|')
     for g in ('legacy MBB', 'legacy BMS', 'Gen3 MBB', 'Gen3 BMS'):
         a = agg.get(g)
         if not a:
@@ -353,7 +375,7 @@ def cmd_report(args):
         pb = f'{100*dec/tot:.1f}' if tot and dec else 'n/a'
         vb = f'{100*vn/vd:.1f}' if vd else 'n/a'
         print(f"| {g} | {a['files']} | {e} | {100*a['full']/e:.2f} | {100*a['partial']/e:.2f} | {100*a['damaged']/e:.2f} | "
-              f"{100*a['unknown']/e:.2f} | {100*a['corrupted']/e:.2f} | {100*a['header']/a['files']:.2f} | {pb} | {vb} | {a['overlap']} |")
+              f"{100*a['restored']/e:.2f} | {100*a['unknown']/e:.2f} | {100*a['corrupted']/e:.2f} | {100*a['header']/a['files']:.2f} | {pb} | {vb} | {a['overlap']} |")
 
 
 def main():
