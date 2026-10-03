@@ -365,6 +365,9 @@ tags
 # Exclude sample log files from this rule
 # !log_data/*.bin
 
+# Shipped data the parser reads at run time (not output)
+!gen3_text_templates.json
+
 # CLAUDE.md should not be ignored - it's documentation
 CLAUDE.md
 AGENTS.md

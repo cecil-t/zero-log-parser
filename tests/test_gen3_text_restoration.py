@@ -208,3 +208,18 @@ def test_end_to_end_with_the_shipped_table_text_and_json():
     assert e['text_restored'] is True and e['restoration_kind'] == 'strict' and e['template_id'].startswith('B')
     assert e['restored_spans'] == [{'offset': 13, 'length': 4, 'text': '_BMS'}]
     assert e['event_as_read'] == 'Entering ZERO{corrupted: 4 bytes lost}_STATE_IDLE'
+
+
+def test_template_table_is_tracked_by_git_not_ignored():
+    # *.json is in .gitignore; the table must be an explicit exception or a fresh clone has no table
+    # and restoration silently does nothing.
+    import os, subprocess
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        out = subprocess.run(['git', 'ls-files', '--error-unmatch', 'gen3_text_templates.json'], cwd=here,
+                             capture_output=True, text=True)
+    except OSError:
+        return
+    if 'not a git repository' in out.stderr:
+        return
+    assert out.returncode == 0, out.stderr
