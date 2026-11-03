@@ -4,7 +4,7 @@ voltage and battery current (Gen2.telemetry_extended_fields()): DC bus
 voltage/current, motor RPM, five temperatures, two validity flags, and the
 variant-dependent tail (12 V DC-DC voltage, distance counter, speed, range
 estimate). Everything is addressed relative to the start of the 4-byte state
-tag; evidence in analysis/gen3_page_claims.md.
+tag.
 
 Same conventions as the other files in this directory: plain test_* functions,
 stdlib only, synthetic in-process buffers, no dataset files checked in.
@@ -74,8 +74,8 @@ def test_pre_tag_and_temperature_fields_decode_on_every_variant():
         assert sd['dc_bus_current_amps'] == 30.2
         assert sd['motor_rpm'] == 2932
         assert sd['ambient_temperature_c'] == 12.5
-        assert sd['drive_temperature_1_c'] == 42
-        assert sd['drive_temperature_2_c'] == 19
+        assert sd['motor_temp_c'] == 42
+        assert sd['inverter_temp_c'] == 19
         assert sd['pack_temperature_warmest_c'] == 16
         assert sd['pack_temperature_coldest_c'] == 15
 
@@ -91,8 +91,8 @@ def test_temperatures_are_signed_32_bit_words_and_implausible_words_are_withheld
         sd = _decode(message_type, _payload(message_type, length, ambient_c100=-650,
                                             temps=(-3, -128, -1, 127)))['structured_data']
         assert sd['ambient_temperature_c'] == -6.5
-        assert sd['drive_temperature_1_c'] == -3
-        assert sd['drive_temperature_2_c'] == -128
+        assert sd['motor_temp_c'] == -3
+        assert sd['inverter_temp_c'] == -128
         assert sd['pack_temperature_warmest_c'] == -1
         assert sd['pack_temperature_coldest_c'] == 127
         tag = TAG[message_type]
@@ -111,14 +111,14 @@ def test_long_variants_carry_battery_12v_voltage_and_the_full_tail():
         sd = _decode(message_type, _payload(message_type, length))['structured_data']
         assert sd['battery_12v_volts'] == 13.101776
         assert sd['distance_km'] == 6268.4
-        assert sd['speed_raw'] == 3942
-        assert sd['range_estimate_raw'] == 8069
+        assert sd['speed_kmh'] == 73.9125
+        assert sd['range_km'] == 80.69
 
 
 def test_0x51_long_variant_carries_only_the_battery_12v_voltage():
     sd = _decode(0x51, _payload(0x51, 68))['structured_data']
     assert sd['battery_12v_volts'] == 13.101776
-    for key in ('distance_km', 'speed_raw', 'range_estimate_raw'):
+    for key in ('distance_km', 'speed_kmh', 'range_km'):
         assert key not in sd
 
 
@@ -127,16 +127,16 @@ def test_short_variants_read_the_tail_four_bytes_earlier_and_have_no_battery_12v
         sd = _decode(message_type, _payload(message_type, length))['structured_data']
         assert 'battery_12v_volts' not in sd
         assert sd['distance_km'] == 6268.4
-        assert sd['speed_raw'] == 3942
-        assert sd['range_estimate_raw'] == 8069
+        assert sd['speed_kmh'] == 73.9125
+        assert sd['range_km'] == 80.69
 
 
 def test_variants_without_a_mapped_tail_carry_no_tail_fields():
     sd = _decode(0x51, _payload(0x51, 64))['structured_data']
-    for key in ('battery_12v_volts', 'distance_km', 'speed_raw', 'range_estimate_raw'):
+    for key in ('battery_12v_volts', 'distance_km', 'speed_kmh', 'range_km'):
         assert key not in sd
     sd = _decode(0x53, _payload(0x53, 93))['structured_data']
-    for key in ('battery_12v_volts', 'distance_km', 'speed_raw', 'range_estimate_raw'):
+    for key in ('battery_12v_volts', 'distance_km', 'speed_kmh', 'range_km'):
         assert key not in sd
 
 
@@ -147,7 +147,7 @@ def test_controller_flag_turns_controller_side_fields_into_none():
         assert sd['motor_controller_data_valid'] is False
         assert sd['bms_data_valid'] is True
         for key in ('dc_bus_voltage_volts', 'dc_bus_current_amps', 'motor_rpm',
-                    'drive_temperature_1_c', 'drive_temperature_2_c', 'speed_raw'):
+                    'motor_temp_c', 'inverter_temp_c', 'speed_kmh'):
             assert sd[key] is None
         # the pack-side temperatures and the ambient temperature are not in this group
         assert sd['pack_temperature_warmest_c'] == 16
@@ -183,23 +183,23 @@ def test_both_flags_set_together_and_neither():
     assert sd['motor_controller_data_valid'] is True and sd['bms_data_valid'] is True
 
 
-def test_speed_that_is_not_an_exact_multiple_of_18750_is_none():
+def test_negative_speed_is_none():
     payload = _payload(0x52, 85)
-    struct.pack_into('<I', payload, TAG[0x52] + 39, 4294967295)
-    assert _decode(0x52, payload)['structured_data']['speed_raw'] is None
+    struct.pack_into('<i', payload, TAG[0x52] + 39, -1)
+    assert _decode(0x52, payload)['structured_data']['speed_kmh'] is None
 
 
 def test_zero_rpm_with_a_valid_controller_group_stays_zero_not_none():
     sd = _decode(0x52, _payload(0x52, 85, rpm=0, speed_quotient=0))['structured_data']
     assert sd['motor_rpm'] == 0
-    assert sd['speed_raw'] == 0
+    assert sd['speed_kmh'] == 0
 
 
 def test_conditions_strings_carry_the_new_fields():
     cond = _decode(0x52, _payload(0x52, 85))['conditions']
-    for text in ('Vdc:105.3V', 'Idc:30.2A', 'RPM:2932', 'Tamb:12.50C', 'Tdrive1:42C', 'Tdrive2:19C',
-                 'Tpack:16/15C', 'Vbat12:13.10V', 'Odo:6268.4km', 'Speed(raw):3942',
-                 'Range(raw):8069', 'Valid(ctrl/bms):1/1'):
+    for text in ('Vdc:105.3V', 'Idc:30.2A', 'RPM:2932', 'Tamb:12.50C', 'Tmotor:42C', 'Tinverter:19C',
+                 'Tpack:16/15C', 'Vbat12:13.10V', 'Odo:6268.4km', 'Speed:73.9125km/h',
+                 'Range:80.69km', 'Valid(ctrl/bms):1/1'):
         assert text in cond
     cond = _decode(0x51, _payload(0x51, 64, flags=0x0a))['conditions']
     assert 'Vdc:n/a' in cond and 'RPM:n/a' in cond and 'Valid(ctrl/bms):0/1' in cond
@@ -211,14 +211,15 @@ def test_shipped_0x51_temperature_keys_are_unchanged():
     assert (sd['temperature_1_celsius'], sd['temperature_4_celsius']) == (42, 15)
 
 
-def test_validity_flags_copy_is_the_raw_byte_at_tag_plus_5_and_derives_nothing():
+def test_temp_flags_is_the_raw_byte_at_tag_plus_5_and_leaves_the_validity_groups_alone():
     for message_type, length in ((0x51, 64), (0x51, 68), (0x52, 81), (0x52, 85), (0x53, 95), (0x53, 99)):
         payload = _payload(message_type, length, flags=0x0a)
         payload[TAG[message_type] + 5] = 0x3c
         sd = _decode(message_type, payload)['structured_data']
-        assert sd['validity_flags_copy'] == 0x3c
-        # tag-25 stays authoritative: the copy value does not change the validity booleans
+        assert sd['temp_flags'] == 0x3c
+        assert 'validity_flags_copy' not in sd
+        # tag-25 stays authoritative for the validity booleans
         assert sd['motor_controller_data_valid'] is False and sd['bms_data_valid'] is True
         payload[TAG[message_type] + 5] = 0x00
         sd = _decode(message_type, payload)['structured_data']
-        assert sd['validity_flags_copy'] == 0 and sd['motor_controller_data_valid'] is False
+        assert sd['temp_flags'] == 0 and sd['motor_controller_data_valid'] is False

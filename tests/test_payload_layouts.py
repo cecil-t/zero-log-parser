@@ -82,12 +82,12 @@ def test_layouts_cover_the_payload_exactly_with_valid_kinds():
     assert Gen2.payload_layout(0x51, 63) is None and Gen2.payload_layout(0x77, 10) is None
 
 
-def test_the_flag_copy_is_a_declared_field_and_tag_29_stays_unknown():
+def test_temp_flags_is_a_declared_field_and_tag_29_stays_unknown():
     for message_type, tier_lengths in ((0x51, (64, 68)), (0x52, (81, 85)), (0x53, (95, 99))):
         tag = 35 if message_type == 0x51 else Gen2.TELEMETRY_TIERS[message_type][2]
         for length in tier_lengths:
             kinds = {i: (k, label) for s, e, k, label in Gen2.payload_layout(message_type, length) for i in range(s, e)}
-            assert kinds[tag + 5] == (FIELD, 'validity_flags_copy')
+            assert kinds[tag + 5] == (FIELD, 'temp_flags')
             assert kinds[tag - 25][0] == FIELD
             if message_type in (0x52, 0x53):
                 assert kinds[tag - 29][0] == UNKNOWN          # unexplained, never marked copy or reserved
@@ -109,8 +109,10 @@ def _payload(message_type, length):
         tag = 35 if message_type == 0x51 else Gen2.TELEMETRY_TIERS[message_type][2]
         buf[tag:tag + 4] = b'RUN\x00'
         buf[tag - 25] = 0                                   # validity flags clear: gated fields visible
-        for rel in (9, 13, 17, 21, 25):                     # the temperature words must hold a plausible value
+        buf[tag + 5] = 0                                    # temp_flags clear: temperatures visible
+        for rel in (13, 17, 21, 25):                        # the temperature words must hold a plausible value
             struct.pack_into('<i', buf, tag + rel, 10)
+        struct.pack_into('<i', buf, tag + 9, 1250)          # an ambient whose scale needs no firmware context
         for key, offset in Gen2.TELEMETRY_TAIL_FIELDS.get((message_type, length), {}).items():
             if key == 'speed':
                 struct.pack_into('<I', buf, tag + offset, 3942 * Gen2.TELEMETRY_SPEED_STEP)
