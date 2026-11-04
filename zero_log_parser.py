@@ -4333,13 +4333,12 @@ class Gen2:
         at tag-25 says the BMS is not reporting (telemetry_pack_fields);
         until that flag was found they were exposed as a raw 0.0.
 
-        Kept, corrected: temperature_1..4_celsius are real (see
-        vst_field_fix.md's per-VIN smoothness, physical-range and seasonal
-        checks), but the previous code read them at bytes 48-51 - the real
-        readings sit at a 4-byte stride, 48/52/56/60 (temp1 happened to
-        already be right); the previous temp2-4 read the zero-filled gap
-        bytes between them, matching the earlier finding that they were
-        zero in 99.97% of real entries.
+        The four temperatures at bytes 48/52/56/60 (tag+13..+25) are read
+        once, as signed 32-bit values with flag handling, by
+        telemetry_extended_fields (motor_temp_c, inverter_temp_c,
+        pack_temperature_warmest_c, pack_temperature_coldest_c). They are not
+        repeated as unsigned bytes: read that way, -1 shows as 255, negative
+        readings as 2xx, and failed sensors as real readings.
 
         Byte 5 (marker) is exposed raw and unlabeled, same as every other
         FST entry type - not confirmed to mean anything, including the
@@ -4365,17 +4364,8 @@ class Gen2:
 
         soc, pack_volts, pack_amps, pack_conditions = cls.telemetry_pack_fields(x, 35)
 
-        temp1 = BinaryTools.unpack('uint8', x, 48)
-        temp2 = BinaryTools.unpack('uint8', x, 52)
-        temp3 = BinaryTools.unpack('uint8', x, 56)
-        temp4 = BinaryTools.unpack('uint8', x, 60)
-
         structured_data = {'vehicle_state': state}
         structured_data.update(prefix)
-        structured_data['temperature_1_celsius'] = temp1
-        structured_data['temperature_2_celsius'] = temp2
-        structured_data['temperature_3_celsius'] = temp3
-        structured_data['temperature_4_celsius'] = temp4
         structured_data['state_of_charge_percent'] = soc
         structured_data['pack_voltage_volts'] = pack_volts
         structured_data['battery_current_amps'] = pack_amps
@@ -4386,8 +4376,6 @@ class Gen2:
         conditions = (
             f"State: {state}, "
             f"{pack_conditions}, "
-            f"Temp1: {temp1}°C, Temp2: {temp2}°C, "
-            f"Temp3: {temp3}°C, Temp4: {temp4}°C, "
             f"{extended_conditions}"
         )
 

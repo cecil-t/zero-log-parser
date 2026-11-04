@@ -271,6 +271,7 @@ The parser automatically detects and structures various telemetry data types. Be
 - `motor_temp_c`, `inverter_temp_c`: the firmware's Motor_Temp and Inverter_Temp
 - `speed_kmh`: null when the logged value is negative; `range_km`: null when the logged value is 0xFFFF
 - Values the controller or BMS group marks as not reporting are null
+- 0x51 entries carry `vehicle_state` instead of `telemetry_tier` and `state`; they no longer carry `temperature_1_celsius` .. `temperature_4_celsius` (unsigned-byte copies of the four named temperatures)
 
 #### Module Registration
 

@@ -716,10 +716,12 @@ firmware-updated entry in the same file, that update's previous revision.
 }
 ```
 
-0x51 entries also carry `vehicle_state` (instead of `telemetry_tier` and `state`)
-and `temperature_1_celsius` .. `temperature_4_celsius` (the same four bytes as the
-motor, inverter and pack temperatures, read as unsigned bytes), and their event is
-`Riding` in RUN and `Vehicle State (<state>)` otherwise.
+0x51 entries also carry `vehicle_state` (instead of `telemetry_tier` and `state`),
+and their event is `Riding` in RUN and `Vehicle State (<state>)` otherwise. Earlier
+versions also emitted `temperature_1_celsius` .. `temperature_4_celsius` on 0x51:
+the same four bytes as the motor, inverter and pack temperatures, read as unsigned
+bytes (so -1 showed as 255 and flagged sensors as real readings). They are no longer
+emitted; use the named fields.
 
 ### `0x54` (Type 84) - Torque Info
 *FST/Gen3 MBB, 22-byte payload*

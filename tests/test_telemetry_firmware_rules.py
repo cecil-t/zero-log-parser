@@ -205,7 +205,8 @@ def test_renamed_keys_are_present_and_the_old_keys_are_gone():
         for key in ('temp_flags', 'motor_temp_c', 'inverter_temp_c'):
             assert key in sd, (hex(message_type), length, key)
         for key in ('validity_flags_copy', 'drive_temperature_1_c', 'drive_temperature_2_c',
-                    'speed_raw', 'range_estimate_raw'):
+                    'speed_raw', 'range_estimate_raw', 'temperature_1_celsius', 'temperature_2_celsius',
+                    'temperature_3_celsius', 'temperature_4_celsius'):
             assert key not in sd, (hex(message_type), length, key)
         has_tail = message_type != 0x51
         assert ('speed_kmh' in sd) is has_tail and ('range_km' in sd) is has_tail

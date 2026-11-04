@@ -203,12 +203,13 @@ def test_conditions_strings_carry_the_new_fields():
         assert text in cond
     cond = _decode(0x51, _payload(0x51, 64, flags=0x0a))['conditions']
     assert 'Vdc:n/a' in cond and 'RPM:n/a' in cond and 'Valid(ctrl/bms):0/1' in cond
-    assert 'Temp1:' in cond   # the shipped 0x51 fields are still there
+    assert 'Temp1:' not in cond
 
 
-def test_shipped_0x51_temperature_keys_are_unchanged():
+def test_0x51_has_no_unsigned_byte_temperature_copies():
     sd = _decode(0x51, _payload(0x51, 64))['structured_data']
-    assert (sd['temperature_1_celsius'], sd['temperature_4_celsius']) == (42, 15)
+    assert not any(key.startswith('temperature_') for key in sd)
+    assert (sd['motor_temp_c'], sd['pack_temperature_coldest_c']) == (42, 15)
 
 
 def test_temp_flags_is_the_raw_byte_at_tag_plus_5_and_leaves_the_validity_groups_alone():
