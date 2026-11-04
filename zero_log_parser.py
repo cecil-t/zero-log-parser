@@ -4891,8 +4891,99 @@ class Gen2:
         except Exception:
             return 0
 
+    # FST/Gen3 downloads can contain the same bytes more than once: whole
+    # 128-byte blocks repeated back to back, larger regions repeated at a
+    # distance, and occasional single entries copied elsewhere. Each copy
+    # decodes to an identical entry. An entry is a duplicate when its whole
+    # unescaped content (type, seconds, sub-second, sequence, marker and
+    # payload) equals an earlier entry's in the same file, in file order; the
+    # first occurrence is kept. Entries that differ only in sub-second,
+    # sequence or seconds are separate log writes and are never duplicates.
+    # One exception: an isolated copy (fewer than DUPLICATE_CONTEXT_BYTES
+    # matching bytes around the two copies, counting both sides) whose
+    # sub-second is 999,999 is kept, because the firmware repeats that value
+    # while its clock runs behind, so identical writes there can be genuine.
+    DUPLICATE_CONTEXT_BYTES = 64
+    DUPLICATE_MIN_ENTRY_BYTES = 11      # type, seconds, sub-second, sequence, marker
+    SUBSECOND_CLAMP_US = 999999
+
     @classmethod
-    def collect_paged_bms_entries(cls, buf, logger, timezone_offset=None, verbosity_level=1, log_type=None, gen3_text=False):
+    def is_fst_platform_file(cls, raw):
+        """True when a file starts with an FST/Gen3 system information entry:
+        0xb2, a length byte, then type 0xfb. FST/Gen3 MBB and BMS downloads
+        start this way; legacy-platform ring-buffer files, which the parser
+        also reads as log_version REV3, start with an ordinary entry."""
+        return len(raw) > 2 and raw[0] == 0xb2 and raw[2] == 0xfb
+
+    @classmethod
+    def duplicate_context_bytes(cls, buf, first, first_len, copy, copy_len):
+        """Matching bytes immediately before and after two copies of an
+        entry (each side counted up to DUPLICATE_CONTEXT_BYTES)."""
+        limit = cls.DUPLICATE_CONTEXT_BYTES
+        n = len(buf)
+        back = 0
+        while back < limit and first - back - 1 >= 0 and buf[first - back - 1] == buf[copy - back - 1]:
+            back += 1
+        fwd = 0
+        a, b = first + first_len, copy + copy_len
+        while fwd < limit and b + fwd < n and buf[a + fwd] == buf[b + fwd]:
+            fwd += 1
+        return back + fwd
+
+    @classmethod
+    def find_duplicate_entries(cls, buf, spans):
+        """For a walk's entries, spans[i] is entry i's (start, length) in buf,
+        or None for an entry with no bytes of its own (a recovered
+        header-destroyed gap). Returns one dict per entry whose content
+        repeats an earlier entry's: index, the index of the first
+        occurrence, gap to the nearest earlier copy, context (the most
+        matching context bytes against any earlier copy), sub-second, and
+        keep (True for the isolated sub-second 999,999 exception)."""
+        seen = {}
+        found = []
+        for i, span in enumerate(spans):
+            if span is None:
+                continue
+            start, length = span
+            if length <= 2:
+                continue
+            content = bytes(BinaryTools.unescape_block(buf[start + 2:start + length]))
+            if len(content) < cls.DUPLICATE_MIN_ENTRY_BYTES:
+                continue
+            earlier = seen.get(content)
+            if earlier is None:
+                seen[content] = [(i, start, length)]
+                continue
+            context = max(cls.duplicate_context_bytes(buf, s0, l0, start, length) for _, s0, l0 in earlier)
+            subsecond = int.from_bytes(content[5:9], 'little')
+            isolated = context < cls.DUPLICATE_CONTEXT_BYTES
+            found.append({
+                'index': i,
+                'first': earlier[0][0],
+                'gap': start - earlier[-1][1],
+                'context': context,
+                'subsecond': subsecond,
+                'keep': isolated and subsecond == cls.SUBSECOND_CLAMP_US,
+            })
+            earlier.append((i, start, length))
+        return found
+
+    @classmethod
+    def drop_duplicate_entries(cls, buf, collected, spans):
+        """collected (the walk's (sort_timestamp, entry_payload, entry_num)
+        list) without the duplicates find_duplicate_entries reports, except
+        the ones it keeps. The rest keep their order and are numbered again
+        from 0 in that order, the same way the paged walker numbers around
+        a span it skips."""
+        drop = {d['index'] for d in cls.find_duplicate_entries(buf, spans) if not d['keep']}
+        if not drop:
+            return collected
+        kept = [c for i, c in enumerate(collected) if i not in drop]
+        return [(ts, payload, n) for n, (ts, payload, _) in enumerate(kept)]
+
+    @classmethod
+    def collect_paged_bms_entries(cls, buf, logger, timezone_offset=None, verbosity_level=1, log_type=None, gen3_text=False,
+                                  entry_spans=None):
         """Marker-aware entry walk for the FST/Gen3 BMS page format
         (is_paged_bms_format()). Builds the same (sort_timestamp,
         entry_payload, entry_num) list LogData._collect_and_process_entries'
@@ -4936,6 +5027,10 @@ class Gen2:
         omitting log_type has the same effect in practice; it is threaded
         through anyway so the two walkers stay consistent rather than one
         silently depending on a platform fact the other doesn't rely on.
+
+        entry_spans, when given, receives each collected entry's (start,
+        length) in buf, or None for a recovered header-destroyed gap entry,
+        in the same order as the returned list (for drop_duplicate_entries).
         """
         n = len(buf)
         parsers = cls._entry_parsers(log_type, gen3_text=gen3_text)
@@ -4971,9 +5066,11 @@ class Gen2:
         collected = []
         entry_num = 0
 
-        def add(entry):
+        def add(entry, span):
             nonlocal entry_num
             collected.append((cls._sort_timestamp_for(entry), entry, entry_num))
+            if entry_spans is not None:
+                entry_spans.append(span)
             entry_num += 1
 
         # Pass 2: walk the spans in byte order, emitting the recovered gap
@@ -4992,7 +5089,7 @@ class Gen2:
                 tail = gap[marker_pos + 4:] if marker_pos != -1 else b''
                 if (marker_pos != -1 and marker_pos <= 3 and len(gap) >= 8
                         and set(tail) - {0xff}):
-                    add(cls._marker_corrupted_entry(' (header destroyed)', marker_pos + 4, tail))
+                    add(cls._marker_corrupted_entry(' (header destroyed)', marker_pos + 4, tail), None)
                 # else: an unexplained gap - left unvisited, exactly like
                 # the normal walk already does for any resync gap.
             prev_end = end
@@ -5004,7 +5101,7 @@ class Gen2:
                 continue
 
             if len(unescaped_block) >= 4 and bytes(unescaped_block[0:4]) == cls.PAGE_MARKER:
-                add(cls._marker_corrupted_entry(' (type destroyed)', 4, unescaped_block[4:]))
+                add(cls._marker_corrupted_entry(' (type destroyed)', 4, unescaped_block[4:]), (start, length))
                 continue
 
             message_type = cls.type_from_block(unescaped_block)
@@ -5037,7 +5134,7 @@ class Gen2:
             if not entry.get('log_level'):
                 entry['log_level'] = determine_log_level(entry.get('event', ''))
             entry['message_type'] = f"0x{message_type:X}"
-            add(entry)
+            add(entry, (start, length))
 
         return collected
 
@@ -5496,6 +5593,7 @@ class LogData(object):
         if self.log_version < REV2 or self.log_version == REV3:
             # Handle REV0/REV1/REV3 formats - collect and sort entries
             collected_entries = []
+            entry_spans = []
             read_pos = 0
 
             if self.log_version == REV3 and Gen2.is_paged_bms_format(self.entries):
@@ -5510,7 +5608,7 @@ class LogData(object):
                 collected_entries = Gen2.collect_paged_bms_entries(
                     self.entries, logger, timezone_offset=self.timezone_offset,
                     verbosity_level=verbosity_level, log_type=dispatch_log_type,
-                    gen3_text=True)
+                    gen3_text=True, entry_spans=entry_spans)
             elif hasattr(self, 'entries_count'):
                 for entry_num in range(self.entries_count):
                     try:
@@ -5541,6 +5639,8 @@ class LogData(object):
                         collected_entries.append((sort_timestamp, entry_payload, entry_num))
                         # `.find` searches the buffer in place, without copying it.
                         _sync = self.entries.find(b'\xb2', read_pos)
+                        # parse_entry read the entry at this same first 0xb2
+                        entry_spans.append((_sync, length) if _sync >= 0 else None)
                         if _sync < 0:
                             break
                         if length > 0:
@@ -5574,6 +5674,18 @@ class LogData(object):
 
             # Apply timestamp interpolation before sorting
             collected_entries = Gen2.interpolate_missing_timestamps(collected_entries, logger)
+
+            # FST/Gen3 only: drop entries whose bytes repeat an earlier entry
+            # (Gen2.find_duplicate_entries). log_version REV3 also covers
+            # legacy-platform ring-buffer files, so the file must also start
+            # with the FST/Gen3 system information entry (Gen2.is_fst_platform_file).
+            # Legacy files are left as read. Runs after interpolation, which
+            # places a missing timestamp by entry number between its
+            # neighbours, so the entries that remain keep the values they had
+            # with the copies present.
+            if self.log_version == REV3 and Gen2.is_fst_platform_file(self.log_file.raw()) \
+                    and len(entry_spans) == len(collected_entries):
+                collected_entries = Gen2.drop_duplicate_entries(self.entries, collected_entries, entry_spans)
 
             # Apply time filtering if specified
             if start_time or end_time:
