@@ -42,8 +42,9 @@ Two extra measures per row:
   varying bytes decoded   of the payload bytes that vary in the corpus (no single value in at least
                           95% of that type and length's entries), the share declared field
 
-Header details read: MBB files need VIN, model, board revision and firmware revision; BMS files need
-the BMS serial number and the pack serial number.
+Header details read: MBB files need VIN, model, board revision and firmware revision; legacy BMS
+files need the BMS serial number and the pack serial number; Gen3 BMS files need the BMS serial
+number and the BCBM id.
 
 Routing: a file that starts with an FST/Gen3 header entry (Gen2.is_fst_platform_file) goes to a Gen3
 row by the log type read from that entry, before any legacy bucket is considered.
@@ -172,8 +173,10 @@ def process_one(path):
             bucket = ('bms_fst_paged' if res['file_size'] == 131328
                       else 'bms_131200_sibling' if res['file_size'] == 131200
                       else 'bms_fst_other' if fst else 'bms_legacy')
+            # Gen3 BMS headers have no pack serial; their BCBM id is required instead
+            second = 'BCBM id' if fst else 'Pack serial number'
             res['header_complete'] = int(hi.get('BMS serial number') not in (None, '', 'Unknown')
-                                         and hi.get('Pack serial number') not in (None, '', 'Unknown'))
+                                         and hi.get(second) not in (None, '', 'Unknown'))
         res['bucket'] = bucket
 
         registered = set(Gen2._entry_parsers(dispatch).keys())
