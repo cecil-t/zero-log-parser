@@ -5985,6 +5985,9 @@ class LogData(object):
         sys_info = OrderedDict()
         log_version = REV0
         header_vin = None   # a VIN read from the file's own header, if any
+        # JSON log_info values decoded here that the text header block has no
+        # line for; emit_json_decoding copies them into log_info as given
+        self.header_json_fields = OrderedDict()
         if len(sys_info) == 0 and (self.log_file.is_mbb() or self.log_file.is_unknown()):
             # Ring buffer format (2024+ firmware) files start directly with log
             # entries, so byte 0 == 0xb2 is a high-confidence, unconditional
@@ -6272,7 +6275,7 @@ class LogData(object):
                 # searches generically instead of assuming a shape - see
                 # analysis/bms_serial_recovery_followup.md Task 1.
                 header_bytes = log.raw()[:0x200]
-                fst_bms = Gen2.is_fst_platform_file(log.raw())
+                fst_bms = Gen2.is_fst_platform_file(log.raw()) and self.log_file.is_bms()
                 board_match = re.search(rb'\x00{4,10}([\x21-\x7e]{4,20})\x00', header_bytes)
                 if board_match:
                     board_offset = board_match.start(1)
@@ -6304,6 +6307,13 @@ class LogData(object):
                 if fst_header is not None:
                     for key, value in Gen2.fst_bms_header_fields(fst_header):
                         sys_info[key] = value
+                if fst_bms:
+                    # FST/Gen3 BMS has no pack serial field
+                    self.header_json_fields['pack_serial_number'] = None
+                    for key, json_key in (('Module model', 'module_model'), ('BCBM id', 'bcbm_id'),
+                                          ('Firmware part', 'firmware_part'), ('Firmware build', 'firmware_build')):
+                        if key in sys_info:
+                            self.header_json_fields[json_key] = sys_info[key]
             else:
                 # Check for two log formats:
                 log_version_code = log.unpack('uint8', 0x4)
@@ -6646,22 +6656,14 @@ class LogData(object):
                 'firmware_rev': self.header_info.get('Firmware rev.', 'Unknown'),
                 'board_rev': self.header_info.get('Board rev.', 'Unknown'),
                 'bms_serial_number': self.header_info.get('BMS serial number', 'Unknown'),
-                # None on FST/Gen3 BMS, which has no pack serial field; the
-                # BCBM id is reported as bcbm_id
-                'pack_serial_number': (None if self.log_file.log_type == 'BMS'
-                                       and Gen2.is_fst_platform_file(self.log_file.raw())
-                                       else self.header_info.get('Pack serial number', 'Unknown')),
+                'pack_serial_number': self.header_info.get('Pack serial number', 'Unknown'),
                 # 'header', 'filename' (a check-digit-valid VIN in the file name) or None
                 'vin_source': getattr(self, 'vin_source', None),
             },
             'entries': []
         }
-        # FST/Gen3 BMS header entry fields, only when the header carries them
-        # (Firmware part is read only from that entry)
-        for key, json_key in (('Module model', 'module_model'), ('BCBM id', 'bcbm_id'),
-                              ('Firmware part', 'firmware_part'), ('Firmware build', 'firmware_build')):
-            if 'Firmware part' in self.header_info and key in self.header_info:
-                json_output['log_info'][json_key] = self.header_info[key]
+        # values the header decode set for JSON only (get_version_and_header)
+        json_output['log_info'].update(getattr(self, 'header_json_fields', {}))
 
         # Convert processed entries to JSON format
         for entry in processed_entries:
