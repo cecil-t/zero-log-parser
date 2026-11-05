@@ -44,6 +44,9 @@ Two extra measures per row:
 
 Header details read: MBB files need VIN, model, board revision and firmware revision; BMS files need
 the BMS serial number and the pack serial number.
+
+Routing: a file that starts with an FST/Gen3 header entry (Gen2.is_fst_platform_file) goes to a Gen3
+row by the log type read from that entry, before any legacy bucket is considered.
 """
 from __future__ import annotations
 
@@ -65,7 +68,7 @@ BMS_ONLY_IDS = {0x03, 0x04, 0x05, 0x06, 0x08, 0x0b, 0x0d, 0x0e, 0x12, 0x13, 0x15
 MBB_ONLY_IDS = {0x02, 0x09, 0x1c, 0x1e, 0x1f, 0x20, 0x26, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d,
                 0x2f, 0x30, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d}
 GROUPS = {'mbb_legacy': 'legacy MBB', 'mbb_fst': 'Gen3 MBB', 'bms_legacy': 'legacy BMS',
-          'bms_fst_paged': 'Gen3 BMS', 'bms_131200_sibling': 'Gen3 BMS'}
+          'bms_fst_paged': 'Gen3 BMS', 'bms_131200_sibling': 'Gen3 BMS', 'bms_fst_other': 'Gen3 BMS'}
 COLUMNS = (
     'filename', 'file_size', 'content_hash', 'status', 'error', 'bucket', 'log_type', 'dispatch_log_type',
     'route_note', 'log_version', 'vin', 'model', 'board_rev', 'firmware_rev', 'bms_serial', 'pack_serial',
@@ -128,7 +131,13 @@ def process_one(path):
 
         dispatch = lf.log_type
         note = None
-        if lf.log_type == zlp.LogFile.log_type_unknown:
+        # FST/Gen3 files are routed by content first (the header entry, see
+        # Gen2.is_fst_platform_file), before any legacy bucket.
+        fst = (Gen2.is_fst_platform_file(lf.raw())
+               and lf.log_type in (zlp.LogFile.log_type_mbb, zlp.LogFile.log_type_bms))
+        if fst:
+            note = 'fst_header'
+        elif lf.log_type == zlp.LogFile.log_type_unknown:
             if lf.has_classic_vin:
                 dispatch, note = zlp.LogFile.log_type_mbb, 'has_classic_vin'
             else:
@@ -153,14 +162,16 @@ def process_one(path):
 
         bucket = None
         if dispatch == zlp.LogFile.log_type_mbb:
-            has_fst = any(e.message_type and e.message_type.startswith('0x') and int(e.message_type, 16) in FST_MARKER_IDS
-                          for e in entries if _hex_ok(e.message_type))
+            has_fst = fst or any(e.message_type and e.message_type.startswith('0x')
+                                 and int(e.message_type, 16) in FST_MARKER_IDS
+                                 for e in entries if _hex_ok(e.message_type))
             bucket = 'mbb_fst' if has_fst else 'mbb_legacy'
             res['header_complete'] = int(all(hi.get(k) not in (None, '', 'Unknown')
                                              for k in ('VIN', 'Model', 'Board rev.', 'Firmware rev.')))
         elif dispatch == zlp.LogFile.log_type_bms:
             bucket = ('bms_fst_paged' if res['file_size'] == 131328
-                      else 'bms_131200_sibling' if res['file_size'] == 131200 else 'bms_legacy')
+                      else 'bms_131200_sibling' if res['file_size'] == 131200
+                      else 'bms_fst_other' if fst else 'bms_legacy')
             res['header_complete'] = int(hi.get('BMS serial number') not in (None, '', 'Unknown')
                                          and hi.get('Pack serial number') not in (None, '', 'Unknown'))
         res['bucket'] = bucket

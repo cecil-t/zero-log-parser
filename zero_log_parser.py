@@ -579,6 +579,12 @@ class LogFile:
     log_type_unknown = 'Unknown Type'
 
     def get_log_type(self):
+        # FST/Gen3 files: the device name in the un-escaped header entry, so
+        # an escape byte or a byte lost in download does not change the type.
+        if Gen2.is_fst_platform_file(self._data):
+            fst_type = Gen2.fst_log_type(self._data)
+            if fst_type:
+                return fst_type
         log_type = None
         if self.is_printable(0x000, count=3):
             log_type = self.unpack_str(0x000, count=3)
@@ -620,10 +626,21 @@ class LogFile:
         return is_valid_vin_checksum(v0) or is_valid_vin_checksum(v1)
 
     def get_filename_vin(self):
-        basename = os.path.basename(self.file_path)
-        if basename and len(basename) > vin_length and vin_guaranteed_prefix in basename:
-            vin_index = basename.index(vin_guaranteed_prefix)
-            return basename[vin_index:vin_index + vin_length]
+        """The first VIN in the file name that passes the check digit
+        (is_valid_vin_checksum), upper-cased, or None. File names are
+        user-supplied, so a shape match alone is not used."""
+        return filename_vin(os.path.basename(self.file_path))
+
+
+_vin_window_re = re.compile(r'(?=([A-HJ-NPR-Z0-9]{17}))')
+
+
+def filename_vin(name: str):
+    """The first 17-character run in name that is a valid VIN, or None."""
+    for candidate in _vin_window_re.findall((name or '').upper()):
+        if is_valid_vin_checksum(candidate):
+            return candidate
+    return None
 
 
 def convert_mv_to_v(milli_volts: int) -> float:
@@ -4907,6 +4924,122 @@ class Gen2:
     DUPLICATE_MIN_ENTRY_BYTES = 11      # type, seconds, sub-second, sequence, marker
     SUBSECOND_CLAMP_US = 999999
 
+    # FST/Gen3 log header entry (type 0xfb), offsets in the un-escaped entry
+    # including its 0xb2 and length bytes. The device name field is 10 bytes
+    # at 0x0d. The BMS fields follow John Myers' (atomicdog) Gen3 datasheet.
+    FST_DEVICE_NAME_WINDOW = (0x0b, 0x12)   # device name searched within these bytes
+    FST_BMS_HEADER_FIELDS = (
+        # (header key, offset, size, kind)
+        ('Module model', 0x17, 16, 'text'),
+        ('BMS serial number', 0x38, 16, 'serial'),
+        ('BCBM id', 0x48, 16, 'serial'),
+        ('Firmware part', 0x58, 16, 'part'),
+        ('Firmware rev.', 0x68, 2, 'u16'),
+        ('Firmware build', 0x6a, 2, 'u16'),
+    )
+    FST_BMS_ANCHOR = re.compile(rb'\d\d-\d{5}\x00')   # firmware part, e.g. 75-08274
+    # Entry types that occur on one FST/Gen3 board only (datasheet type lists:
+    # MBB 0x46-0x54, BMS 0x4b-0x8d; 0xfb and 0xfd are written by both).
+    FST_MBB_ONLY_TYPES = range(0x46, 0x4b)
+    FST_BMS_ONLY_TYPES = range(0x55, 0x8e)
+
+    @classmethod
+    def fst_header_entry(cls, raw):
+        """The un-escaped first entry of an FST/Gen3 file, 0xb2 and length
+        byte included, or None when the file does not start with one."""
+        if not cls.is_fst_platform_file(raw):
+            return None
+        length = raw[1]
+        return bytes([raw[0], length]) + bytes(BinaryTools.unescape_block(bytearray(raw[2:length])))
+
+    @classmethod
+    def fst_device_name(cls, header):
+        """'MBB' or 'BMS' from the device name field of an un-escaped FST/Gen3
+        header entry, or None. A byte lost or added during download moves or
+        damages the name, so it is searched a few bytes either side of 0x0d:
+        'MBB', 'BMS' (which also matches the 'BBMS' damage), and 'MS' followed
+        by a NUL, the 'BMS' damage where the 'B' is lost."""
+        lo, hi = cls.FST_DEVICE_NAME_WINDOW
+        window = header[lo:hi]
+        found = {name for name in ('MBB', 'BMS') if name.encode() in window}
+        if not found and b'MS\x00' in window:
+            found = {'BMS'}
+        return found.pop() if len(found) == 1 else None
+
+    @classmethod
+    def fst_board_from_entry_types(cls, raw):
+        """'MBB' or 'BMS' from entry types that occur on one FST/Gen3 board
+        only, or None. Used when the header's device name is unreadable. The
+        paged BMS page marker is BMS only; otherwise the 0xb2-framed entries
+        are walked by their length bytes and their type bytes are counted
+        against FST_MBB_ONLY_TYPES and FST_BMS_ONLY_TYPES. The answer is
+        given only when one side has hits and the other has none."""
+        if cls.is_paged_bms_format(raw):
+            return 'BMS'
+        mbb = bms = 0
+        pos = raw.find(b'\xb2')
+        while 0 <= pos < len(raw) - 2:
+            length = raw[pos + 1]
+            entry_type = raw[pos + 2]
+            if entry_type in cls.FST_MBB_ONLY_TYPES:
+                mbb += 1
+            elif entry_type in cls.FST_BMS_ONLY_TYPES:
+                bms += 1
+            pos = raw.find(b'\xb2', pos + max(length, 2))
+        if mbb and not bms:
+            return 'MBB'
+        if bms and not mbb:
+            return 'BMS'
+        return None
+
+    @classmethod
+    def fst_log_type(cls, raw):
+        """'MBB' or 'BMS' for an FST/Gen3 file: the header's device name,
+        else entry-type evidence; None when neither decides."""
+        header = cls.fst_header_entry(raw)
+        if header is None:
+            return None
+        return cls.fst_device_name(header) or cls.fst_board_from_entry_types(raw)
+
+    @classmethod
+    def fst_bms_header_fields(cls, header):
+        """The BMS fields of an un-escaped FST/Gen3 BMS header entry, as an
+        ordered list of (header key, value). Readable fields only: a field is
+        left out when it is not where it should be.
+
+        A byte lost before the device name moves every later field one byte
+        early; a byte added inside the device name ('BBMS', with one NUL pad
+        dropped) leaves them in place. The shift is taken from the firmware
+        part field (two digits, a dash, five digits, NUL) at its datasheet
+        offset or one byte either side. Without that anchor nothing is shown,
+        rather than values read at a guessed position. Text fields must be
+        printable and NUL-terminated inside the field; a text field that
+        fails, or a number past the end of the entry, is left out."""
+        shift = None
+        for candidate in (0, -1, 1):
+            start = 0x58 + candidate
+            if cls.FST_BMS_ANCHOR.match(header, start, start + 16):
+                shift = candidate
+                break
+        if shift is None:
+            return []
+        fields = []
+        for key, offset, size, kind in cls.FST_BMS_HEADER_FIELDS:
+            start = offset + shift
+            if start + size > len(header):
+                continue
+            chunk = header[start:start + size]
+            if kind == 'u16':
+                fields.append((key, struct.unpack('<H', chunk)[0]))
+                continue
+            if b'\x00' not in chunk:
+                continue
+            text = chunk.split(b'\x00')[0].decode('ascii', 'replace')
+            shape = {'text': r'[\x20-\x7e]{2,}', 'serial': r'[A-Za-z0-9-]{4,}', 'part': r'\d\d-\d{5}'}[kind]
+            if re.fullmatch(shape, text):
+                fields.append((key, text))
+        return fields
+
     @classmethod
     def is_fst_platform_file(cls, raw):
         """True when a file starts with an FST/Gen3 system information entry:
@@ -5851,6 +5984,7 @@ class LogData(object):
         logger = logger_for_input(self.log_file.file_path)
         sys_info = OrderedDict()
         log_version = REV0
+        header_vin = None   # a VIN read from the file's own header, if any
         if len(sys_info) == 0 and (self.log_file.is_mbb() or self.log_file.is_unknown()):
             # Ring buffer format (2024+ firmware) files start directly with log
             # entries, so byte 0 == 0xb2 is a high-confidence, unconditional
@@ -5914,11 +6048,10 @@ class LogData(object):
                         gen3_vin_offset = candidate_offset
                         break
 
-                if gen3_vin:
-                    sys_info['VIN'] = gen3_vin
-                else:
-                    filename_vin = self.log_file.get_filename_vin()
-                    sys_info['VIN'] = filename_vin if filename_vin else 'Unknown'
+                # The VIN shown is settled at the end of this method (header,
+                # else a check-digit-valid file name VIN, else Unknown).
+                header_vin = gen3_vin
+                sys_info['VIN'] = gen3_vin or 'Unknown'
 
                 # Look for serial number - it's located 0x302 bytes after first run date header
                 serial_found = False
@@ -6038,6 +6171,7 @@ class LogData(object):
                             fb_entry = Gen2.mbb_system_information(unescaped[5:])
                             fb_data = fb_entry.get('structured_data')
                             if fb_data:
+                                header_vin = fb_data['vin']
                                 sys_info['VIN'] = fb_data['vin']
                                 sys_info['Model'] = fb_data['model']
                                 sys_info['Board rev.'] = fb_data['board_rev']
@@ -6053,14 +6187,14 @@ class LogData(object):
                 if is_vin(vin_v0):
                     log_version = REV0
                     sys_info['Serial number'] = log.unpack_str(0x200, count=21)
-                    sys_info['VIN'] = vin_v0
+                    sys_info['VIN'] = header_vin = vin_v0
                     sys_info['Firmware rev.'] = log.unpack('uint16', 0x27b)
                     sys_info['Board rev.'] = log.unpack('uint16', 0x27d)
                     model_offset = 0x27f
                 elif is_vin(vin_v1):
                     log_version = REV1
                     sys_info['Serial number'] = log.unpack_str(0x210, count=13)
-                    sys_info['VIN'] = vin_v1
+                    sys_info['VIN'] = header_vin = vin_v1
                     sys_info['Firmware rev.'] = log.unpack('uint16', 0x266)
                     # uint16 @ 0x268, directly after Firmware rev., mirroring
                     # REV0's own Firmware rev./Board rev. layout. Confirmed
@@ -6076,7 +6210,7 @@ class LogData(object):
                 elif is_vin(vin_v2):
                     log_version = REV2
                     sys_info['Serial number'] = log.unpack_str(0x03C, count=13)
-                    sys_info['VIN'] = vin_v2
+                    sys_info['VIN'] = header_vin = vin_v2
                     sys_info['Firmware rev.'] = log.unpack_str(0x06b, count=7)
                     sys_info['Board rev.'] = log.unpack_str(0x05C, count=8)
                     model_offset = 0x019
@@ -6087,7 +6221,8 @@ class LogData(object):
                     # REV0 log and shouldn't be indistinguishable from one
                     # (see analysis/issue11_status.md, section 0b).
                     log_version = REV_UNKNOWN
-                    sys_info['VIN'] = vin_v0
+                    # No VIN-shaped value at any known offset; settled below.
+                    sys_info['VIN'] = 'Unknown'
                     # Match REV3's pattern for fields we have no offset to read:
                     # explicitly 'Unknown', not simply absent from sys_info.
                     # Nothing downstream currently indexes these keys directly
@@ -6102,12 +6237,11 @@ class LogData(object):
                     sys_info['Board rev.'] = 'Unknown'
                     model_offset = 0x27f
 
-                filename_vin = self.log_file.get_filename_vin()
-                if 'VIN' not in sys_info or not BinaryTools.is_printable(sys_info['VIN']):
-                    logger.warning("VIN unreadable: %s", sys_info['VIN'])
-                elif sys_info['VIN'] != filename_vin:
-                    logger.warning("VIN mismatch: header:%s filename:%s", sys_info['VIN'],
-                                   filename_vin)
+                name_vin = self.log_file.get_filename_vin()
+                if header_vin is None:
+                    logger.warning("VIN unreadable: %s", vin_v0)
+                elif name_vin and header_vin != name_vin:
+                    logger.warning("VIN mismatch: header:%s filename:%s", header_vin, name_vin)
                 sys_info['Model'] = log.unpack_str(model_offset, count=3)
                 sys_info['Initial date'] = log.unpack_str(0x2a, count=20)
         if len(sys_info) == 0 and (self.log_file.is_bms() or self.log_file.is_unknown()):
@@ -6156,6 +6290,14 @@ class LogData(object):
                 else:
                     sys_info['BMS serial number'] = 'Unknown'
                     sys_info['Pack serial number'] = 'Unknown'
+
+                # FST/Gen3 BMS: the header entry's own fields, read from the
+                # un-escaped entry (Gen2.fst_bms_header_fields). Its serial
+                # replaces the null-bounded search above when readable.
+                fst_header = Gen2.fst_header_entry(log.raw())
+                if fst_header is not None:
+                    for key, value in Gen2.fst_bms_header_fields(fst_header):
+                        sys_info[key] = value
             else:
                 # Check for two log formats:
                 log_version_code = log.unpack('uint8', 0x4)
@@ -6234,7 +6376,28 @@ class LogData(object):
                     sys_info['Pack serial number'] = log.unpack_str(0x06c, count=7)
         elif self.log_file.is_unknown():
             sys_info['System info'] = 'unknown'
+        self.vin_source = self.settle_vin(sys_info, header_vin)
         return log_version, sys_info
+
+    def settle_vin(self, sys_info, header_vin):
+        """Set sys_info['VIN'] by the VIN rule and return its source:
+        'header' for the VIN in the file's own header, else 'filename' for a
+        VIN in the file name that passes the check digit, else None with the
+        VIN shown as Unknown. A header without a VIN field (BMS) gets a VIN
+        line, placed first, only when the file name supplies one."""
+        if header_vin:
+            sys_info['VIN'] = header_vin
+            return 'header'
+        name_vin = self.log_file.get_filename_vin()
+        if name_vin:
+            had_vin = 'VIN' in sys_info
+            sys_info['VIN'] = name_vin
+            if not had_vin:
+                sys_info.move_to_end('VIN', last=False)
+            return 'filename'
+        if 'VIN' in sys_info:
+            sys_info['VIN'] = 'Unknown'
+        return None
 
     def get_entries_and_counts(self, log: LogFile):
         logger = logger_for_input(log.file_path)
@@ -6458,16 +6621,8 @@ class LogData(object):
         json_output = {
             'metadata': {
                 'source_file': self.log_file.file_path,
-                # LogFile.log_type (the MBB/BMS magic string in the file
-                # itself, else a case-insensitive filename match; the same
-                # value the text output's title uses) when it is definite.
-                # When it is 'Unknown Type' (printable junk where the magic
-                # string would be), keep the older filename test, which is
-                # right far more often there. See
-                # analysis/json_emitter_fix.md, Addendum Part B.
-                'log_type': (self.log_file.log_type
-                             if self.log_file.log_type in (LogFile.log_type_mbb, LogFile.log_type_bms)
-                             else 'MBB' if 'MBB' in self.log_file.file_path or 'Mbb' in self.log_file.file_path else 'BMS'),
+                # LogFile.log_type, the same value the text output's title shows
+                'log_type': self.log_file.log_type,
                 'parser_version': f'zero-log-parser-{PARSER_VERSION}',
                 'generated_at': datetime.now().isoformat(),
                 'timezone': f'UTC{self.timezone_offset/3600:+.1f}' if self.timezone_offset else 'UTC+0.0',
@@ -6485,10 +6640,18 @@ class LogData(object):
                 'firmware_rev': self.header_info.get('Firmware rev.', 'Unknown'),
                 'board_rev': self.header_info.get('Board rev.', 'Unknown'),
                 'bms_serial_number': self.header_info.get('BMS serial number', 'Unknown'),
-                'pack_serial_number': self.header_info.get('Pack serial number', 'Unknown')
+                'pack_serial_number': self.header_info.get('Pack serial number', 'Unknown'),
+                # 'header', 'filename' (a check-digit-valid VIN in the file name) or None
+                'vin_source': getattr(self, 'vin_source', None),
             },
             'entries': []
         }
+        # FST/Gen3 BMS header entry fields, only when the header carries them
+        # (Firmware part is read only from that entry)
+        for key, json_key in (('Module model', 'module_model'), ('BCBM id', 'bcbm_id'),
+                              ('Firmware part', 'firmware_part'), ('Firmware build', 'firmware_build')):
+            if 'Firmware part' in self.header_info and key in self.header_info:
+                json_output['log_info'][json_key] = self.header_info[key]
 
         # Convert processed entries to JSON format
         for entry in processed_entries:
@@ -6547,6 +6710,8 @@ class LogData(object):
             write_line()
 
             for k, v in self.header_info.items():
+                if k == 'VIN' and getattr(self, 'vin_source', None) == 'filename':
+                    k = 'VIN (from filename)'
                 write_line('{0:18} {1}'.format(k, v))
 
             # Add timezone information
