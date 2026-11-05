@@ -37,7 +37,10 @@ The Zero Log Parser converts binary motorcycle log files into structured JSON fo
     "initial_date": "YYYY-MM-DD|Unknown",
     "model": "MODEL_NAME|Unknown",
     "firmware_rev": "REVISION|Unknown",
-    "board_rev": "BOARD_REV|Unknown"
+    "board_rev": "BOARD_REV|Unknown",
+    "bms_serial_number": "SERIAL|Unknown",
+    "pack_serial_number": "SERIAL|Unknown|null",
+    "vin_source": "header|filename|null"
   },
   "entries": [
     // Array of log entries (see Entry Structure below)
@@ -68,6 +71,10 @@ These fields contain extracted motorcycle information when available:
 | `model` | Motorcycle model |
 | `firmware_rev` | Firmware revision |
 | `board_rev` | Board revision |
+| `bms_serial_number` | BMS board serial number |
+| `pack_serial_number` | Battery pack serial number from legacy BMS headers. `null` for FST/Gen3 BMS logs (files that start with an 0xFB system information entry): their header has no pack serial field, and the bytes at the position legacy files use hold the BCBM id (reported as `bcbm_id`), or the board part number when the header is one byte short |
+| `vin_source` | Where `vin` came from: `header` (decoded from the file), `filename` (a VIN in the file name with a valid check digit, used when the header has none), or `null` when no VIN was found |
+| `module_model`, `bcbm_id`, `firmware_part`, `firmware_build` | FST/Gen3 BMS only, from the 0xFB system information entry; present when that entry is readable |
 
 ## Entry Structure
 

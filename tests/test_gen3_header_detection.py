@@ -157,6 +157,39 @@ def test_bms_normal_header_and_fields():
         == ('FST TEST', 'BCBM9999', '75-00001', 7, 321)
 
 
+# Pack serial: none on Gen3 BMS, unchanged on legacy BMS
+
+def test_gen3_bms_has_no_pack_serial():
+    ld, txt, js = _parse(_gen3_bms_file(_bms_header()), 'synthetic.bin')
+    assert 'Pack serial number' not in ld.header_info
+    lines = _header_lines(txt)
+    assert 'Pack serial number' not in lines and lines['BCBM id'] == 'BCBM9999'
+    assert js['log_info']['pack_serial_number'] is None and js['log_info']['bcbm_id'] == 'BCBM9999'
+
+
+def test_gen3_bms_shifted_header_has_no_pack_serial():
+    # one byte lost before the name: the old search landed on the board part here
+    header = _bms_header()
+    header = header[:0x0d] + header[0x0e:]
+    ld, txt, js = _parse(_gen3_bms_file(header), 'synthetic.bin')
+    assert ld.log_file.log_type == 'BMS'
+    assert 'Pack serial number' not in ld.header_info
+    assert '40-00000-01' not in txt
+    assert js['log_info']['pack_serial_number'] is None
+
+
+def test_legacy_ring_buffer_bms_keeps_pack_serial():
+    # starts with an ordinary 0xb2 entry, not 0xfb, so not an FST/Gen3 file
+    data = _entry(0x60, b'\x01\x02\x03\x04') + b'\x00' * 8 + b'ZZ0000TEST02' + b'\x00' * 4 + b'00tb0007\x00'
+    data += b'\x00' * 64 + _entry(0x60, b'\x01\x02\x03\x04')
+    ld, txt, js = _parse(data, 'synthetic_BMS.bin')
+    assert ld.log_file.log_type == 'BMS'
+    assert ld.header_info['BMS serial number'] == 'ZZ0000TEST02'
+    assert ld.header_info['Pack serial number'] == '00tb0007'
+    assert _header_lines(txt)['Pack serial number'] == '00tb0007'
+    assert js['log_info']['pack_serial_number'] == '00tb0007'
+
+
 def test_bms_124_byte_header_lost_b():
     # the 'B' of 'BMS' is lost: 'MS' at 0x0d and every later field one byte early
     full = _bms_header()

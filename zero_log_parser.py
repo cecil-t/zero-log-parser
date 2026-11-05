@@ -6272,6 +6272,7 @@ class LogData(object):
                 # searches generically instead of assuming a shape - see
                 # analysis/bms_serial_recovery_followup.md Task 1.
                 header_bytes = log.raw()[:0x200]
+                fst_bms = Gen2.is_fst_platform_file(log.raw())
                 board_match = re.search(rb'\x00{4,10}([\x21-\x7e]{4,20})\x00', header_bytes)
                 if board_match:
                     board_offset = board_match.start(1)
@@ -6281,15 +6282,20 @@ class LogData(object):
                     # start. A few files have it shifted one byte later than
                     # that; stripping leading nulls before the printability
                     # check recovers those too (same source, Task 1).
-                    pack_field = bytes(header_bytes[board_offset + 16:board_offset + 32])
-                    pack_str = pack_field.lstrip(b'\x00').split(b'\x00')[0].decode('ascii', 'replace')
-                    if len(pack_str) >= 4 and BinaryTools.is_printable(pack_str):
-                        sys_info['Pack serial number'] = pack_str
-                    else:
-                        sys_info['Pack serial number'] = 'Unknown'
+                    # Not on FST/Gen3 BMS: there that position is the header
+                    # entry's BCBM id (shown as 'BCBM id' below), or the board
+                    # part number when the header is one byte short.
+                    if not fst_bms:
+                        pack_field = bytes(header_bytes[board_offset + 16:board_offset + 32])
+                        pack_str = pack_field.lstrip(b'\x00').split(b'\x00')[0].decode('ascii', 'replace')
+                        if len(pack_str) >= 4 and BinaryTools.is_printable(pack_str):
+                            sys_info['Pack serial number'] = pack_str
+                        else:
+                            sys_info['Pack serial number'] = 'Unknown'
                 else:
                     sys_info['BMS serial number'] = 'Unknown'
-                    sys_info['Pack serial number'] = 'Unknown'
+                    if not fst_bms:
+                        sys_info['Pack serial number'] = 'Unknown'
 
                 # FST/Gen3 BMS: the header entry's own fields, read from the
                 # un-escaped entry (Gen2.fst_bms_header_fields). Its serial
@@ -6640,7 +6646,11 @@ class LogData(object):
                 'firmware_rev': self.header_info.get('Firmware rev.', 'Unknown'),
                 'board_rev': self.header_info.get('Board rev.', 'Unknown'),
                 'bms_serial_number': self.header_info.get('BMS serial number', 'Unknown'),
-                'pack_serial_number': self.header_info.get('Pack serial number', 'Unknown'),
+                # None on FST/Gen3 BMS, which has no pack serial field; the
+                # BCBM id is reported as bcbm_id
+                'pack_serial_number': (None if self.log_file.log_type == 'BMS'
+                                       and Gen2.is_fst_platform_file(self.log_file.raw())
+                                       else self.header_info.get('Pack serial number', 'Unknown')),
                 # 'header', 'filename' (a check-digit-valid VIN in the file name) or None
                 'vin_source': getattr(self, 'vin_source', None),
             },
