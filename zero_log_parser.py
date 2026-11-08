@@ -4278,9 +4278,13 @@ class LogData(object):
                             read_pos = _sync + length
                         else:
                             # A delimiter with a zero length byte; step past it
-                            # so the walk cannot freeze here.
+                            # so the walk cannot freeze here. With no later 0xb2
+                            # in the buffer, step from this entry's own position
+                            # (_sync), not from read_pos: when padding sits before
+                            # this entry, read_pos + 1 finds the same entry again
+                            # on every pass and emits it once per padding byte.
                             _next = self.entries.find(b'\xb2', _sync + 1)
-                            read_pos = _next if _next > read_pos else read_pos + 1
+                            read_pos = _next if _next > read_pos else _sync + 1
                     except Exception as e:
                         logger.warning(f'Error parsing entry {entry_num}: {e}')
                         break
