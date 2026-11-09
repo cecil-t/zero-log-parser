@@ -44,6 +44,8 @@ def _write_minimal_rev0_file(path, entries_bytes):
 
 def _entry(message_type, timestamp, payload):
     body = bytes([message_type]) + struct.pack('<I', timestamp) + bytes(payload)
+    # no escaping here, so the test values must not contain 0xb2 or 0xfe
+    assert b'\xb2' not in body and b'\xfe' not in body, hex(timestamp)
     return bytearray([0xb2, len(body) + 2]) + bytearray(body)
 
 
@@ -261,8 +263,10 @@ def test_value_between_the_window_and_2030_is_invalid_now():
 
 
 def test_lower_bound_is_unchanged():
-    # one below the bound is uptime (backfilled here because a date follows in the same cycle)
-    assert _sources([1_262_304_000 - 1, 1_262_304_000], FIXED_NOW) == ['backfilled', 'clock']
+    # 2010-01-01 is a date; one below it is read as uptime, here 40 years of it,
+    # which cannot fit the file's window, so it is invalid rather than backfilled
+    assert _sources([1_262_304_000 - 1, 1_262_304_000], FIXED_NOW) == ['invalid', 'clock']
+    assert _sources([1_262_304_000 + 100, 1_262_304_000 + 200], FIXED_NOW) == ['clock', 'clock']
 
 
 # --- backfill anchor rule: A is rejected only when its neighbours agree with each other and disagree with it ---
@@ -354,3 +358,126 @@ def test_rejection_never_turns_boot_entries_into_uptime():
 def test_rejected_a_is_still_displayed_as_decoded():
     es = _with_now(FIXED_NOW, lambda: _by_number(_entries(_log((T1, OPEN), (0, OPEN), (4, CLOSE), (T1 + 500, REG), (T1 + 100, OPEN), (T1 + 105, CLOSE)))))
     assert es[4]['timestamp'] == time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(T1 + 500)) and es[4]['time_source'] == 'clock'
+
+
+# --- backfill window: a backfilled time stays within the file's clock times plus or minus 12 months ---
+
+DAY = 86400
+YEAR = 365 * DAY
+
+
+def _tabular(entries_bytes, fmt):
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, 'test.bin')
+        _write_minimal_rev0_file(path, entries_bytes)
+        ld = LogData(LogFile(path), timezone_offset=0)
+        out = os.path.join(d, 'test.' + fmt)
+        ld.emit_tabular_decoding(out, out_format=fmt)
+        return open(out, encoding='utf-8-sig').read()
+
+
+def _txt_rows(text):
+    """entry number -> the TXT line, for entry lines."""
+    rows = {}
+    for line in text.splitlines():
+        if line[:1] == ' ' and line[1:6].isdigit():
+            rows[int(line[1:6])] = line
+    return rows
+
+
+def test_backfill_window_is_clock_range_plus_minus_twelve_months_inside_floor_and_ceiling():
+    mar_2020 = int(datetime(2020, 3, 15, 8, 0, 0, tzinfo=timezone.utc).timestamp())
+    jul_2021 = int(datetime(2021, 7, 31, 8, 0, 0, tzinfo=timezone.utc).timestamp())
+    lo, hi = Gen2.backfill_window([jul_2021, mar_2020], FIXED_NOW)
+    assert lo == int(datetime(2019, 3, 15, 8, 0, 0, tzinfo=timezone.utc).timestamp())
+    assert hi == int(datetime(2022, 7, 31, 8, 0, 0, tzinfo=timezone.utc).timestamp())
+    # near 2010 the floor wins; near the ceiling clock_max wins
+    lo, _ = Gen2.backfill_window([Gen2.CLOCK_MIN + 30 * DAY], FIXED_NOW)
+    assert lo == Gen2.CLOCK_MIN
+    _, hi = Gen2.backfill_window([LIMIT_2026 - DAY], FIXED_NOW)
+    assert hi == LIMIT_2026
+    # no clock times: floor to ceiling
+    assert Gen2.backfill_window([], FIXED_NOW) == (Gen2.CLOCK_MIN, LIMIT_2026)
+    # 29 February one year on is 28 February
+    feb_29 = int(datetime(2024, 2, 29, 12, 0, 0, tzinfo=timezone.utc).timestamp())
+    assert Gen2.shift_months(feb_29, 12) == int(datetime(2025, 2, 28, 12, 0, 0, tzinfo=timezone.utc).timestamp())
+
+
+def test_garbage_uptime_of_decades_is_invalid_and_does_not_split_the_cycle():
+    g = 26 * YEAR
+    data = _log((T1 - 5000, OPEN), (0, OPEN), (3, CLOSE), (g, REG), (6, OPEN), (T1, CLOSE))
+    es = _with_now(FIXED_NOW, lambda: _by_number(_entries(data)))
+    assert es[4]['time_source'] == 'invalid' and es[4]['timestamp'] is None
+    assert es[4]['raw_timestamp'] == g and 'uptime_s' not in es[4] and es[4]['sort_timestamp'] is None
+    # without it 0, 3, 6 are one cycle, placed from 6
+    assert (es[2]['time_source'], es[2]['sort_timestamp']) == ('backfilled', T1 - 6)
+    assert (es[3]['time_source'], es[3]['sort_timestamp']) == ('backfilled', T1 - 3)
+    assert (es[5]['time_source'], es[5]['sort_timestamp']) == ('backfilled', T1)
+    # the same value as the last uptime before the date does not move the others decades back
+    data = _log((0, OPEN), (3, CLOSE), (g, REG), (T1, CLOSE))
+    es = _with_now(FIXED_NOW, lambda: _by_number(_entries(data)))
+    assert es[3]['time_source'] == 'invalid'
+    assert es[1]['sort_timestamp'] == T1 - 3 and es[2]['sort_timestamp'] == T1
+
+
+def test_long_but_plausible_uptime_inside_the_window_keeps_its_date():
+    # parked 200 days with the bike on (plausible for a BMS); the date follows
+    data = _log((T1 - 400 * DAY, OPEN), (100 * DAY, OPEN), (200 * DAY, CLOSE), (T1, REG))
+    es = _with_now(FIXED_NOW, lambda: _by_number(_entries(data)))
+    assert (es[2]['time_source'], es[2]['sort_timestamp']) == ('backfilled', T1 - 100 * DAY)
+    assert (es[3]['time_source'], es[3]['sort_timestamp']) == ('backfilled', T1)
+    assert es[3]['uptime_s'] == 200 * DAY
+
+
+def test_last_uptime_before_the_anchor_garbage_within_the_window_width():
+    # clock times span four years, so a three-year uptime is not ruled out by length,
+    # but counted back from the anchor it puts the power-on before the window
+    late = T1 + 4 * YEAR - 30 * DAY
+    data = _log((0, OPEN), (3, CLOSE), (5, REG), (3 * YEAR, OPEN), (T1, CLOSE), (late, OPEN))
+    es = _with_now(FIXED_NOW, lambda: _by_number(_entries(data)))
+    assert es[4]['time_source'] == 'invalid' and es[4]['timestamp'] is None
+    # placed from 5, the last uptime whose power-on is inside the window
+    assert [es[n]['sort_timestamp'] for n in (1, 2, 3)] == [T1 - 5, T1 - 2, T1]
+    assert all(es[n]['time_source'] == 'backfilled' for n in (1, 2, 3))
+
+
+def test_future_dated_entry_shows_unknown_and_sorts_by_log_position():
+    future = 1_938_902_400     # 2031-06-01: beyond FIXED_NOW's ceiling
+    data = _log((T1, OPEN), (future, CLOSE), (T1 + 10, REG))
+    es = _with_now(FIXED_NOW, lambda: _entries(data))
+    assert [e['entry_number'] for e in es] == [3, 2, 1]        # newest first, 2 just after 1
+    e = _by_number(es)[2]
+    assert e['time_source'] == 'invalid' and e['timestamp'] is None and e['raw_timestamp'] == future
+    assert e['sort_timestamp'] is None
+    txt = _with_now(FIXED_NOW, lambda: _txt(data))
+    assert 'Unknown' in _txt_rows(txt)[2] and '2031' not in txt
+    for fmt in ('csv', 'tsv'):
+        out = _with_now(FIXED_NOW, lambda: _tabular(data, fmt))
+        assert '2031' not in out
+        assert any('Unknown' in line for line in out.splitlines()[1:])
+
+
+def test_invalid_from_backfill_shows_unknown_in_text():
+    data = _log((0, OPEN), (3, CLOSE), (26 * YEAR, REG), (T1, CLOSE))
+    rows = _txt_rows(_with_now(FIXED_NOW, lambda: _txt(data)))
+    assert 'Unknown' in rows[3] and '1988' not in rows[1] + rows[2] + rows[3]
+
+
+def test_file_with_one_clock_entry():
+    # window is that one time plus or minus 12 months
+    ok = _log((0, OPEN), (300 * DAY, CLOSE), (T1, REG))
+    es = _with_now(FIXED_NOW, lambda: _by_number(_entries(ok)))
+    assert (es[2]['time_source'], es[2]['sort_timestamp']) == ('backfilled', T1)
+    assert (es[1]['time_source'], es[1]['sort_timestamp']) == ('backfilled', T1 - 300 * DAY)
+    # 400 days counted back from the only date is outside the window; nothing else can place it
+    bad = _log((400 * DAY, CLOSE), (T1, REG))
+    es = _with_now(FIXED_NOW, lambda: _by_number(_entries(bad)))
+    assert es[1]['time_source'] == 'invalid' and es[1]['timestamp'] is None
+    assert es[2]['time_source'] == 'clock'
+
+
+def test_uptime_only_file_keeps_uptime_and_drops_what_cannot_fit():
+    # no clock times: window is 2010 to the ceiling, about 19 years wide at FIXED_NOW
+    es = _with_now(FIXED_NOW, lambda: _by_number(_entries(_log((5, OPEN), (26 * YEAR, CLOSE), (9, REG)))))
+    assert es[1]['time_source'] == 'uptime' and es[3]['time_source'] == 'uptime'
+    assert es[2]['time_source'] == 'invalid'

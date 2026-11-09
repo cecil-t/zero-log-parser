@@ -100,7 +100,7 @@ Each log entry follows this structure:
 | Field | Description |
 |-------|-------------|
 | `entry_number` | Original entry number from the log file |
-| `timestamp` | Human-readable timestamp in configured timezone. `null` when the entry has only a time since power-on (`time_source` is `"uptime"`) |
+| `timestamp` | Human-readable timestamp in configured timezone. `null` when the entry has only a time since power-on (`time_source` is `"uptime"`) or no usable date (`"invalid"`) |
 | `sort_timestamp` | True UTC Unix epoch (not dependent on the host timezone); `null` when the entry has no time of day |
 | `raw_timestamp` | The 32-bit value as read from the entry (legacy MBB/BMS entries; Gen3 entries repeat the epoch). `null` for corrupted or recovered entries that carry none |
 | `uptime_s` | Seconds since the bike was switched on, when the raw value is one (`time_source` `"uptime"` or `"backfilled"`). Omitted otherwise |
@@ -139,12 +139,14 @@ A legacy entry's raw 32-bit timestamp is seconds since power-on when it is below
 | `time_source` | Meaning |
 |---|---|
 | `clock` | Raw value is a wall-clock epoch. `timestamp`/`sort_timestamp` are that time |
-| `backfilled` | Raw value is uptime, and the same power cycle later reaches a wall-clock time T. The time is T minus (the last uptime before T minus this entry's uptime), accurate to about a second |
+| `backfilled` | Raw value is uptime, and the same power cycle later reaches a wall-clock time T. The time is T minus (the reference uptime minus this entry's uptime), accurate to about a second. The reference is normally the last uptime before T (see the backfill window below) |
 | `uptime` | Raw value is uptime and the cycle never gets a date. No time of day is invented: `timestamp` and `sort_timestamp` are `null`, `uptime_s` holds the value, and the text output shows `+H:MM:SS` |
-| `invalid` | Raw value is a wall-clock epoch later than the end of the UTC date 30 months after the day the log is parsed (a rolling limit, so it moves with the calendar), which is corrupt rather than a date. `timestamp` shows the value as decoded, `sort_timestamp` is `null`. The lower bound for wall-clock values stays at 2010-01-01 UTC |
+| `invalid` | No usable date. Either the raw value is a wall-clock epoch later than the end of the UTC date 30 months after the day the log is parsed (a rolling limit, so it moves with the calendar), or it is an uptime that cannot be placed inside the backfill window (below). `timestamp` and `sort_timestamp` are `null` and `raw_timestamp` holds the value; the text, CSV and TSV output show `Unknown`, as for an entry with no stored time. The lower bound for wall-clock values stays at 2010-01-01 UTC |
 | `null` | The entry has no raw timestamp (corrupted or recovered entry) |
 
 Which clock entry anchors the backfill: the first clock entry A of a power cycle that has uptime entries before it, unless it is an outlier. A is rejected when the next clock entry N of the cycle is earlier than A by more than 60 s (A is a future outlier), or when the last dated entry before the cycle (P) is later than A by more than 60 s while N is not earlier than P by more than 60 s (A is a past outlier whose neighbours agree). Long forward gaps never reject an anchor. A rejected A passes the anchor to N, with the same arithmetic, only if N is within 10 minutes of P and of the clock entry after N (where they exist); otherwise the cycle's boot entries stay `uptime`. A keeps `time_source` `clock` and its own time either way.
+
+Backfill window: a backfilled time must lie between the file's earliest clock time minus 12 months and its latest clock time plus 12 months, and between 2010-01-01 UTC and the rolling limit above (with no clock times, just those two). The window is deliberately loose, because a bike can sit unused and its clock can drift. The reference uptime for a cycle is the last uptime entry before T whose power-on time (T minus its uptime) is inside the window. An uptime entry that cannot be placed inside the window and at or before T is `invalid`, and so is an uptime longer than the whole window. Invalid entries take no part in finding power cycles or in placing other entries; the cycles are worked out again without them.
 
 Newest entries come first. Entries with a real time sort by time. Entries without a time of day keep their log position: they sit just after the nearest earlier dated entry, in reverse log order; a log with no dates at all comes out in reverse log order. Text output of such a log starts with the note "This log has no dates or times of day. Times are shown as time since the bike was switched on."
 

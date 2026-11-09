@@ -828,6 +828,10 @@ class Gen2:
     # Anchor rule for backfill (see assign_legacy_times), in seconds
     ANCHOR_TOLERANCE = 60       # how far a clock value may sit out of line with its neighbour before it counts as disagreeing
     ANCHOR_AGREE_WINDOW = 600   # N agrees with N2 when N <= N2 <= N + this
+    # A backfilled time must lie within this many months of the file's own
+    # clock times (before the earliest, after the latest). Deliberately loose:
+    # a bike can sit unused and its clock can drift.
+    BACKFILL_MARGIN_MONTHS = 12
 
     @staticmethod
     def utc_now():
@@ -847,45 +851,42 @@ class Gen2:
         return calendar.timegm((year, month, day, 23, 59, 59))
 
     @staticmethod
+    def shift_months(epoch, months):
+        """The UTC epoch `months` calendar months after (or, if negative,
+        before) `epoch`, same time of day. A day that does not exist in the
+        target month becomes the last day of that month."""
+        t = gmtime(epoch)
+        month_index = t.tm_year * 12 + (t.tm_mon - 1) + months
+        year, month = month_index // 12, month_index % 12 + 1
+        day = min(t.tm_mday, calendar.monthrange(year, month)[1])
+        return calendar.timegm((year, month, day, t.tm_hour, t.tm_min, t.tm_sec))
+
+    @classmethod
+    def backfill_window(cls, clock_epochs, now=None):
+        """(earliest, latest) UTC epoch a backfilled time may take: the file's
+        earliest clock time minus BACKFILL_MARGIN_MONTHS to its latest plus
+        BACKFILL_MARGIN_MONTHS, inside CLOCK_MIN and clock_max(now). With no
+        clock times it is CLOCK_MIN to clock_max(now)."""
+        lo, hi = cls.CLOCK_MIN, cls.clock_max(now)
+        if clock_epochs:
+            lo = max(lo, cls.shift_months(min(clock_epochs), -cls.BACKFILL_MARGIN_MONTHS))
+            hi = min(hi, cls.shift_months(max(clock_epochs), cls.BACKFILL_MARGIN_MONTHS))
+        return lo, hi
+
+    @staticmethod
     def format_uptime(seconds):
         """Seconds since power-on, shown as +H:MM:SS."""
         return '+%d:%02d:%02d' % (seconds // 3600, (seconds % 3600) // 60, seconds % 60)
 
     @classmethod
-    def assign_legacy_times(cls, collected, timezone_offset=None, now=None):
-        """
-        Give every legacy (Gen2 parse_entry) entry its time, from the raw uint32.
-
-        A raw value below CLOCK_MIN is seconds since the bike was switched on
-        (it restarts at every key-on); anything else is wall-clock epoch. The
-        real date arrives part-way through each power cycle (on the entry
-        after "Module 00 Registered"), so the entries before it carry only
-        uptime. Entries are taken in log order, split into power cycles
-        (uptime drops, or wall clock is followed by uptime), and in a cycle
-        that later reaches wall-clock time T the earlier uptime entries get
-        T - (last uptime before T - own uptime), marked "backfilled". A cycle
-        that never gets a date keeps its uptime and gets no time of day.
-
-        collected: list of (sort_timestamp, payload, entry_num) in log order.
-        now: the moment the future limit is measured from (default: the current time).
-        Returns the same shape, with sort_timestamp a true UTC epoch (0 for
-        uptime-only and timeless entries), payload['time'] the display string,
-        and payload['time_source'/'raw_timestamp'/'uptime_s'/'_order'] set.
-        """
-        offset = timezone_offset or 0
-        clock_max = cls.clock_max(now)
+    def _place_legacy_times(cls, collected, kind, lo):
+        """One pass of assign_legacy_times: power cycles and backfill for the
+        current kinds. Entries of kind 'invalid' (and entries with no raw
+        timestamp) take no part. Returns (epoch, source, rejected): epoch and
+        source per entry, and the uptime entries that could not be placed
+        inside the window."""
         n = len(collected)
-        kind = [None] * n          # 'clock', 'uptime', 'invalid' or None (entry has no raw timestamp)
-        for i, (_, payload, _num) in enumerate(collected):
-            raw = payload.get('original_timestamp')
-            if raw is None:
-                continue
-            if raw < cls.CLOCK_MIN:
-                kind[i] = 'uptime'
-            elif raw <= clock_max:
-                kind[i] = 'clock'
-            else:
-                kind[i] = 'invalid'
+        raw_of = lambda i: collected[i][1]['original_timestamp']
 
         # Power cycles, in log order
         cycle = [0] * n
@@ -894,11 +895,11 @@ class Gen2:
         prev_uptime = None
         for i in range(n):
             k = kind[i]
-            if k is None:
+            if k is None or k == 'invalid':
                 cycle[i] = cid
                 continue
             if k == 'uptime':
-                raw = collected[i][1]['original_timestamp']
+                raw = raw_of(i)
                 if prev_kind == 'clock' or (prev_kind == 'uptime' and raw < prev_uptime):
                     cid += 1
                 prev_uptime = raw
@@ -919,8 +920,12 @@ class Gen2:
         # A rejected A hands the anchor to N with the same arithmetic. Otherwise A anchors,
         # whatever the forward gap, and this rule never turns a boot entry into uptime.
         # A keeps its own clock time and display either way.
+        # The reference uptime R is the last uptime entry before the anchor T with
+        # T - R >= lo (its power-on inside the window). Entries are placed at
+        # T - (R - own uptime); one that lands before lo or after T is rejected.
         epoch = [None] * n
         source = [None] * n
+        rejected = []
         groups = {}
         order = []
         for i in range(n):
@@ -929,9 +934,8 @@ class Gen2:
                 order.append(cycle[i])
             groups[cycle[i]].append(i)
             if kind[i] == 'clock':
-                epoch[i] = collected[i][1]['original_timestamp']
+                epoch[i] = raw_of(i)
                 source[i] = 'clock'
-        raw_of = lambda i: collected[i][1]['original_timestamp']
         clocks_of = {c: [i for i in idx if kind[i] == 'clock'] for c, idx in groups.items()}
         last_dated = None
         tol = cls.ANCHOR_TOLERANCE
@@ -958,13 +962,78 @@ class Gen2:
                         past_outlier = p is not None and a_raw < p - tol and n_raw >= p - tol
                         if (future_outlier or past_outlier) and n_agrees:
                             anchor = clocks[1]
-                    last_uptime = raw_of(before[-1])
+                    t = raw_of(anchor)
+                    reference = next((i for i in reversed(before) if t - raw_of(i) >= lo), None)
                     for i in before:
-                        epoch[i] = raw_of(anchor) - (last_uptime - raw_of(i))
+                        placed = None if reference is None else t - (raw_of(reference) - raw_of(i))
+                        if placed is None or not lo <= placed <= t:
+                            rejected.append(i)
+                            continue
+                        epoch[i] = placed
                         source[i] = 'backfilled'
             for i in idx:
                 if epoch[i] is not None:
                     last_dated = epoch[i]
+        return epoch, source, rejected
+
+    @classmethod
+    def assign_legacy_times(cls, collected, timezone_offset=None, now=None):
+        """
+        Give every legacy (Gen2 parse_entry) entry its time, from the raw uint32.
+
+        A raw value below CLOCK_MIN is seconds since the bike was switched on
+        (it restarts at every key-on); anything else is wall-clock epoch. The
+        real date arrives part-way through each power cycle (on the entry
+        after "Module 00 Registered"), so the entries before it carry only
+        uptime. Entries are taken in log order, split into power cycles
+        (uptime drops, or wall clock is followed by uptime), and in a cycle
+        that later reaches wall-clock time T the earlier uptime entries get
+        T - (reference uptime - own uptime), marked "backfilled". A cycle
+        that never gets a date keeps its uptime and gets no time of day.
+
+        Backfilled times must lie inside the file's window (backfill_window).
+        The reference is the last uptime entry before T whose power-on time,
+        T minus its uptime, is inside the window; usually that is simply the
+        last uptime entry before T. An uptime entry that cannot be placed
+        inside the window and at or before T is marked "invalid": no date,
+        no part in power-cycle detection or placing other entries, and the
+        cycles are worked out again without it. An uptime longer than the
+        window itself cannot be real and is "invalid" from the start, as is a
+        wall-clock value past clock_max.
+
+        collected: list of (sort_timestamp, payload, entry_num) in log order.
+        now: the moment the future limit is measured from (default: the current time).
+        Returns the same shape, with sort_timestamp a true UTC epoch (0 for
+        uptime-only and timeless entries), payload['time'] the display string,
+        and payload['time_source'/'raw_timestamp'/'uptime_s'/'_order'] set.
+        """
+        offset = timezone_offset or 0
+        clock_max = cls.clock_max(now)
+        n = len(collected)
+        raw_of = lambda i: collected[i][1]['original_timestamp']
+        kind = [None] * n          # 'clock', 'uptime', 'invalid' or None (entry has no raw timestamp)
+        for i, (_, payload, _num) in enumerate(collected):
+            raw = payload.get('original_timestamp')
+            if raw is None:
+                continue
+            if raw < cls.CLOCK_MIN:
+                kind[i] = 'uptime'
+            elif raw <= clock_max:
+                kind[i] = 'clock'
+            else:
+                kind[i] = 'invalid'
+        lo, hi = cls.backfill_window([raw_of(i) for i in range(n) if kind[i] == 'clock'], now)
+        for i in range(n):
+            if kind[i] == 'uptime' and raw_of(i) > hi - lo:
+                kind[i] = 'invalid'
+
+        # Entries the placement rejects become invalid; then work it all out again without them
+        while True:
+            epoch, source, rejected = cls._place_legacy_times(collected, kind, lo)
+            if not rejected:
+                break
+            for i in rejected:
+                kind[i] = 'invalid'
 
         # Order key: real times by time; others sit just after the nearest earlier dated entry
         out = []
@@ -983,7 +1052,8 @@ class Gen2:
                 sort_ts = 0
                 dated = False
             elif kind[i] == 'invalid':
-                payload['time'] = strftime(ZERO_TIME_FORMAT, gmtime(raw + offset))
+                # no usable date: shown like an entry with no stored time
+                payload['time'] = 'Unknown'
                 payload['time_source'] = 'invalid'
                 sort_ts = 0
                 dated = False
@@ -5585,12 +5655,11 @@ class Gen3TelemetryFirmware:
 class Gen3:
     entry_data_fencepost = b'\x00\xb2'
     Entry = namedtuple('Gen3EntryType', ['event', 'time', 'conditions', 'uninterpreted', 'log_level', 'message_type'])
-    min_timestamp = datetime.strptime('2019-01-01', '%Y-%M-%d')
-    max_timestamp = datetime.now() + timedelta(days=365)
 
     @classmethod
     def timestamp_is_valid(cls, event_timestamp: datetime):
-        return cls.min_timestamp < event_timestamp < cls.max_timestamp
+        epoch = event_timestamp.timestamp()
+        return Gen2.CLOCK_MIN <= epoch <= Gen2.clock_max()
 
     @classmethod
     def payload_to_entry(cls, entry_payload: bytearray, hex_on_error=False, logger=None, verbosity_level=1) -> Entry:
@@ -6056,8 +6125,9 @@ class LogData(object):
             time_str = entry_payload.get('time', '0')
             entry_time = self._parse_entry_timestamp(time_str)
 
-            # Skip obviously invalid timestamps (too far in the future, or epoch)
-            if calendar.timegm(entry_time.timetuple()) > Gen2.clock_max() or entry_time.year == 1970:
+            # Entries with no date (uptime only, invalid, or no stored time)
+            # cannot be compared with the range and are kept
+            if entry_payload.get('time_source') not in ('clock', 'backfilled'):
                 filtered_entries.append((sort_timestamp, entry_payload, entry_num))
                 continue
 
@@ -6816,8 +6886,9 @@ class LogData(object):
         for entry in processed_entries:
             json_entry = {
                 'entry_number': entry.entry_number,
-                # Power-on-only entries have no time of day: null here, see uptime_s
-                'timestamp': None if entry.time_source == 'uptime' else entry.timestamp,
+                # Power-on-only entries have no time of day (see uptime_s) and
+                # invalid ones no usable date (see raw_timestamp): null here
+                'timestamp': None if entry.time_source in ('uptime', 'invalid') else entry.timestamp,
                 'sort_timestamp': entry.sort_timestamp,
                 'log_level': entry.log_level,
                 'event': entry.event,
@@ -6892,7 +6963,8 @@ class LogData(object):
             # Use centralized processing
             processed_entries = self._collect_and_process_entries(logger, start_time, end_time)
 
-            if processed_entries and all(e.time_source in ('uptime', 'invalid') for e in processed_entries):
+            if processed_entries and all(e.time_source in ('uptime', 'invalid') for e in processed_entries) \
+                    and any(e.time_source == 'uptime' for e in processed_entries):
                 write_line('This log has no dates or times of day. Times are shown as time since the bike was switched on.')
                 write_line()
 
