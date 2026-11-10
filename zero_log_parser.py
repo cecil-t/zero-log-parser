@@ -5283,7 +5283,16 @@ class Gen2:
             if earlier is None:
                 seen[content] = [(i, start, length)]
                 continue
-            context = max(cls.duplicate_context_bytes(buf, s0, l0, start, length) for _, s0, l0 in earlier)
+            # duplicate_context_bytes returns at most 2 * DUPLICATE_CONTEXT_BYTES
+            # (that many bytes before and after), so the search stops at the first
+            # copy that reaches it. The most recent copy is tried first: in files
+            # that store one page many times in a row it is the one that reaches it.
+            cap = 2 * cls.DUPLICATE_CONTEXT_BYTES
+            context = 0
+            for _, s0, l0 in reversed(earlier):
+                context = max(context, cls.duplicate_context_bytes(buf, s0, l0, start, length))
+                if context >= cap:
+                    break
             subsecond = int.from_bytes(content[5:9], 'little')
             isolated = context < cls.DUPLICATE_CONTEXT_BYTES
             found.append({
