@@ -40,7 +40,14 @@ The Zero Log Parser converts binary motorcycle log files into structured JSON fo
     "board_rev": "BOARD_REV|Unknown",
     "bms_serial_number": "SERIAL|Unknown",
     "pack_serial_number": "SERIAL|Unknown|null",
-    "vin_source": "header|filename|null"
+    "vin_source": "header|filename|null",
+    "platform": "gen3|legacy|null",
+    "page_stats": {
+      "page_size": 128,
+      "total_pages": 1024,
+      "distinct_pages": 992,
+      "repeated_pages": 1
+    }
   },
   "entries": [
     // Array of log entries (see Entry Structure below)
@@ -75,6 +82,19 @@ These fields contain extracted motorcycle information when available:
 | `pack_serial_number` | Battery pack serial number from legacy BMS headers. `null` for FST/Gen3 BMS logs (files that start with an 0xFB system information entry): their header has no pack serial field, and the bytes at the position legacy files use hold the BCBM id (reported as `bcbm_id`), or the board part number when the header is one byte short |
 | `vin_source` | Where `vin` came from: `header` (decoded from the file), `filename` (a VIN in the file name with a valid check digit, used when the header has none), or `null` when no VIN was found |
 | `module_model`, `bcbm_id`, `firmware_part`, `firmware_build` | FST/Gen3 BMS only, from the 0xFB system information entry; present when that entry is readable |
+| `platform` | Present in every file. `gen3` when the file starts with an FST/Gen3 system information entry (0xB2, a length byte, then type 0xFB), `legacy` when the file starts with the classic `MBB\0` or `BMS\0` magic, or the header decode identifies a legacy layout without it (a valid VIN at a known offset, a known BMS layout, or a ring-buffer file), `null` otherwise. It describes the file's header, not the bike: a legacy-platform file whose start is erased or damaged and whose layout is not identified is `null` |
+| `page_stats` | FST/Gen3 BMS only (`platform` is `gen3` and `log_type` is `BMS`); absent for every other file. The file is read as 128-byte pages, and page 0 is the header page. See below |
+
+#### page_stats
+
+| Field | Description |
+|-------|-------------|
+| `page_size` | 128 |
+| `total_pages` | Whole 128-byte pages after the header page |
+| `distinct_pages` | Pages after the header page that are distinct by exact content, not counting blank pages (one byte value throughout) or marker-plus-erased pages (`00 f0 ff 00` followed by 0xFF) |
+| `repeated_pages` | Pages after the header page that are byte-identical to the page before, not counting blank or marker-plus-erased pages |
+
+A normal file has nearly as many distinct pages as pages, and few or no repeated pages. In some early Gen3 BMS logs most pages are copies of the page before: the file holds only the distinct pages' entries, and what was logged between them is not in the file, so those logs have far fewer entries than their size suggests.
 
 ## Entry Structure
 

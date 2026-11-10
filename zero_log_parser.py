@@ -4927,6 +4927,30 @@ class Gen2:
                 and bytes(buf[cls.PAGE_SIZE * 2:cls.PAGE_SIZE * 2 + 4]) == cls.PAGE_MARKER)
 
     @classmethod
+    def fst_bms_page_stats(cls, buf):
+        """Page counts for an FST/Gen3 BMS file, split into 128-byte pages.
+        Page 0 is the header page; total_pages counts the whole pages after
+        it. A blank page (one byte value throughout) and a marker-plus-erased
+        page (the page marker followed by 0xff) are left out of
+        distinct_pages (distinct by exact content) and repeated_pages
+        (byte-identical to the page before)."""
+        size = cls.PAGE_SIZE
+        erased = cls.PAGE_MARKER + b'\xff' * (size - len(cls.PAGE_MARKER))
+        pages = [bytes(buf[i:i + size]) for i in range(0, len(buf) - size + 1, size)]
+        data = pages[1:]
+
+        def counted(page):
+            return len(set(page)) > 1 and page != erased
+
+        return OrderedDict([
+            ('page_size', size),
+            ('total_pages', len(data)),
+            ('distinct_pages', len({p for p in data if counted(p)})),
+            ('repeated_pages', sum(1 for i in range(1, len(pages))
+                                   if pages[i] == pages[i - 1] and counted(pages[i]))),
+        ])
+
+    @classmethod
     def _marker_corrupted_entry(cls, event_suffix, corrupted_byte_count, undecoded_tail):
         """A synthetic entry for bytes the page marker destroyed - either an
         entry's type/timestamp header (found via a real 0xb2) or its entire
@@ -6204,6 +6228,10 @@ class LogData(object):
         # JSON log_info values decoded here that the text header block has no
         # line for; emit_json_decoding copies them into log_info as given
         self.header_json_fields = OrderedDict()
+        # True once a legacy-platform header layout is identified (classic
+        # MBB with a valid VIN, classic BMS with a known layout, or a
+        # ring-buffer file); used with the classic magic for log_info.platform
+        legacy_header = False
         if len(sys_info) == 0 and (self.log_file.is_mbb() or self.log_file.is_unknown()):
             # Ring buffer format (2024+ firmware) files start directly with log
             # entries, so byte 0 == 0xb2 is a high-confidence, unconditional
@@ -6240,6 +6268,7 @@ class LogData(object):
                                          and not _legacy_vin_present()):
                 # Ring buffer format detected
                 log_version = REV3  # New revision for ring buffer format
+                legacy_header = True
 
                 # Gen3 header fields: offsets from PR #17 (AtomicDog),
                 # confirmed against 418 real Gen3/FST files in
@@ -6456,6 +6485,7 @@ class LogData(object):
                     sys_info['Firmware rev.'] = 'Unknown'
                     sys_info['Board rev.'] = 'Unknown'
                     model_offset = 0x27f
+                legacy_header = log_version != REV_UNKNOWN
 
                 name_vin = self.log_file.get_filename_vin()
                 if header_vin is None:
@@ -6479,6 +6509,7 @@ class LogData(object):
             # separate, BMS-specific handling.
             if log.raw()[0] == 0xb2:
                 log_version = REV3  # Ring buffer format
+                legacy_header = True
                 sys_info['Initial date'] = 'Unknown'
 
                 # Board serial: three shapes are known in the corpus
@@ -6557,6 +6588,8 @@ class LogData(object):
                     log_version = REV2
                 else:
                     logger.warning("Unknown Log Format: %s", log_version_code)
+                legacy_header = (log.raw()[0x300:0x304] == b'\xc0\xc0\xc0\xc0'
+                                 or log_version_code in (0xb6, 0xde, 0x79))
                 sys_info['Initial date'] = log.unpack_str(0x12, count=20)
                 if log_version == REV0:
                     log.require_length(0x320 + 8, 'the BMS serial numbers')
@@ -6615,6 +6648,18 @@ class LogData(object):
         elif self.log_file.is_unknown():
             sys_info['System info'] = 'unknown'
         self.vin_source = self.settle_vin(sys_info, header_vin)
+
+        # log_info.platform: 'gen3' for files that start with an FST/Gen3
+        # system information entry; 'legacy' for files that start with the
+        # classic MBB or BMS magic or whose legacy layout was identified
+        # above; null otherwise. page_stats for FST/Gen3 BMS files only.
+        if Gen2.is_fst_platform_file(log.raw()):
+            self.header_json_fields['platform'] = 'gen3'
+            if self.log_file.is_bms():
+                self.header_json_fields['page_stats'] = Gen2.fst_bms_page_stats(log.raw())
+        else:
+            legacy_magic = bytes(log.raw()[:4]) in (b'MBB\x00', b'BMS\x00')
+            self.header_json_fields['platform'] = 'legacy' if legacy_header or legacy_magic else None
         return log_version, sys_info
 
     def settle_vin(self, sys_info, header_vin):

@@ -131,7 +131,7 @@ def test_rev0_mbb():
         'vin': '538SM5Z26ECA03998', 'serial_number': '2014_mbb_0386e1_00603',
         'initial_date': 'Sep 22 2017 14:18:52', 'model': 'SS',
         'firmware_rev': 53, 'board_rev': 3,
-        'bms_serial_number': 'Unknown', 'pack_serial_number': 'Unknown', 'vin_source': 'header'}
+        'bms_serial_number': 'Unknown', 'pack_serial_number': 'Unknown', 'vin_source': 'header', 'platform': 'legacy'}
     _assert_matches_header(ld, j)
 
 
@@ -142,7 +142,7 @@ def test_rev1_mbb():
         'vin': '538SMCZ66HCG07739', 'serial_number': 'sj4216zer0653',
         'initial_date': 'Aug  9 2019 14:21:01', 'model': 'SR',
         'firmware_rev': 29, 'board_rev': 1956,
-        'bms_serial_number': 'Unknown', 'pack_serial_number': 'Unknown', 'vin_source': 'header'}
+        'bms_serial_number': 'Unknown', 'pack_serial_number': 'Unknown', 'vin_source': 'header', 'platform': 'legacy'}
     _assert_matches_header(ld, j)
 
 
@@ -153,7 +153,7 @@ def test_rev3_gen3_mbb():
         'vin': '538ZFAZ75LCK12639', 'serial_number': 'Unknown',
         'initial_date': 'Unknown', 'model': 'SRF',
         'firmware_rev': 14, 'board_rev': 2,
-        'bms_serial_number': 'Unknown', 'pack_serial_number': 'Unknown', 'vin_source': 'header'}
+        'bms_serial_number': 'Unknown', 'pack_serial_number': 'Unknown', 'vin_source': 'header', 'platform': 'gen3'}
     _assert_matches_header(ld, j)
 
 
@@ -164,7 +164,7 @@ def test_rev1_bms_serials_and_absent_keys():
         'vin': 'Unknown', 'serial_number': 'Unknown',
         'initial_date': 'Oct  5 2020 14:03:22', 'model': 'Unknown',
         'firmware_rev': 'Unknown', 'board_rev': 'Unknown',
-        'bms_serial_number': 'SJ0120ZER0405', 'pack_serial_number': '19tb1945', 'vin_source': None}
+        'bms_serial_number': 'SJ0120ZER0405', 'pack_serial_number': '19tb1945', 'vin_source': None, 'platform': 'legacy'}
     _assert_matches_header(ld, j)
 
 
