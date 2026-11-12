@@ -4495,6 +4495,13 @@ class LogData(object):
                         and cls._SHIFTED_SERIAL_RE.fullmatch(serial)
                         and cls._SHIFTED_MODEL_RE.fullmatch(model)):
                     continue
+                # The initial date of the same header image: a1a1a1a1 at
+                # base + 0x26, the date at base + 0x2a, as at base 0.
+                initial_date = None
+                if base + 0x26 >= 0 and raw[base + 0x26:base + 0x2a] == b'\xa1\xa1\xa1\xa1':
+                    initial_date = BinaryTools.unpack_str(raw, base + 0x2a, count=20)
+                    if not cls._SHIFTED_DATE_RE.fullmatch(initial_date):
+                        initial_date = None
                 return OrderedDict([
                     ('layout', version),
                     ('base', base),
@@ -4503,6 +4510,7 @@ class LogData(object):
                     ('Firmware rev.', BinaryTools.unpack('uint16', raw, base + firmware_o)),
                     ('Board rev.', BinaryTools.unpack('uint16', raw, base + board_o)),
                     ('Model', model),
+                    ('Initial date', initial_date),
                 ])
         return None
 
@@ -4790,6 +4798,12 @@ class LogData(object):
                     header_vin = shifted['VIN']
                     for key in ('Serial number', 'VIN', 'Firmware rev.', 'Board rev.', 'Model'):
                         sys_info[key] = shifted[key]
+                    # The initial date read above (fixed 0x2a, or the first
+                    # a1a1a1a1 in the file) is replaced only when it is not a
+                    # date and the shifted header image has one.
+                    if (shifted['Initial date'] is not None
+                            and not self._SHIFTED_DATE_RE.fullmatch(sys_info.get('Initial date') or '')):
+                        sys_info['Initial date'] = shifted['Initial date']
         if len(sys_info) == 0 and (self.log_file.is_bms() or self.log_file.is_unknown()):
             # Ring buffer format (2024+ firmware) files start directly with
             # log entries, the same board-agnostic 0xb2 marker the MBB
