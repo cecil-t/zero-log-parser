@@ -4087,6 +4087,10 @@ REV0 = 0
 REV1 = 1
 REV2 = 2
 REV3 = 3  # Ring buffer format (2024+ firmware)
+# The model field of the classic REV0 (0x27f) and REV1 (0x26C) header block:
+# 16 bytes, the model text then zero padding. Values seen run up to 5
+# characters (DSRBF, FXE11, FXS11).
+CLASSIC_MODEL_FIELD_LENGTH = 16
 REV_UNKNOWN = -1  # No legacy VIN offset validated and no ring-buffer marker found;
                   # distinct from REV0 so these files aren't silently counted as
                   # successfully-identified REV0 logs. Sorts before REV0-REV3 but
@@ -4658,7 +4662,7 @@ class LogData(object):
                     sys_info['VIN'] = vin_v0
                     sys_info['Firmware rev.'] = log.unpack('uint16', 0x27b)
                     sys_info['Board rev.'] = log.unpack('uint16', 0x27d)
-                    model_offset = 0x27f
+                    model_offset, model_count = 0x27f, CLASSIC_MODEL_FIELD_LENGTH
                 elif is_vin(vin_v1):
                     log_version = REV1
                     sys_info['Serial number'] = log.unpack_str(0x210, count=13)
@@ -4674,14 +4678,16 @@ class LogData(object):
                         sys_info['Board rev.'] = log.unpack('uint16', 0x268)
                     except Exception:
                         sys_info['Board rev.'] = 'Unknown'
-                    model_offset = 0x26B
+                    # 0x26B is a lead byte (0xaa, or 0x41 on board rev. 420),
+                    # not part of the model: the model starts at 0x26C.
+                    model_offset, model_count = 0x26C, CLASSIC_MODEL_FIELD_LENGTH
                 elif is_vin(vin_v2):
                     log_version = REV2
                     sys_info['Serial number'] = log.unpack_str(0x03C, count=13)
                     sys_info['VIN'] = vin_v2
                     sys_info['Firmware rev.'] = log.unpack_str(0x06b, count=7)
                     sys_info['Board rev.'] = log.unpack_str(0x05C, count=8)
-                    model_offset = 0x019
+                    model_offset, model_count = 0x019, 3
                 else:
                     logger.warning("Unknown Log Format")
                     # Distinct sentinel, not REV0: none of the three legacy VIN
@@ -4702,7 +4708,7 @@ class LogData(object):
                     sys_info['Serial number'] = 'Unknown'
                     sys_info['Firmware rev.'] = 'Unknown'
                     sys_info['Board rev.'] = 'Unknown'
-                    model_offset = 0x27f
+                    model_offset, model_count = 0x27f, 3
 
                 filename_vin = self.log_file.get_filename_vin()
                 if 'VIN' not in sys_info or not BinaryTools.is_printable(sys_info['VIN']):
@@ -4710,7 +4716,7 @@ class LogData(object):
                 elif sys_info['VIN'] != filename_vin:
                     logger.warning("VIN mismatch: header:%s filename:%s", sys_info['VIN'],
                                    filename_vin)
-                sys_info['Model'] = log.unpack_str(model_offset, count=3)
+                sys_info['Model'] = log.unpack_str(model_offset, count=model_count)
                 sys_info['Initial date'] = log.unpack_str(0x2a, count=20)
         if len(sys_info) == 0 and (self.log_file.is_bms() or self.log_file.is_unknown()):
             # Ring buffer format (2024+ firmware) files start directly with
