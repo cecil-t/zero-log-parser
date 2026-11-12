@@ -1538,8 +1538,21 @@ class Gen2:
         # For other debug messages, return as normal
         return {
             'event': message,
-            'log_level': log_level
+            'log_level': cls.fault_state_log_level(message) or log_level
         }
+
+    # Gen3 fault text, "Fault set|pending|cleared: NAME": the level follows
+    # the fault state, not the FAULT keyword in determine_log_level(), which
+    # would make all three ERROR. "Fault set & cleared since last time faults
+    # logged" is not a fault state and is left alone.
+    FAULT_STATE_LOG_LEVELS = {'set': 'ERROR', 'pending': 'WARNING', 'cleared': 'INFO'}
+    _FAULT_STATE_TEXT = re.compile(r'Fault (set|pending|cleared): ')
+
+    @classmethod
+    def fault_state_log_level(cls, message):
+        """ERROR, WARNING or INFO for Gen3 fault state text, else None."""
+        m = cls._FAULT_STATE_TEXT.match(message or '')
+        return cls.FAULT_STATE_LOG_LEVELS.get(m.group(1)) if m else None
 
     @classmethod
     def board_status(cls, x):
