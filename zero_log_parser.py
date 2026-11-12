@@ -5819,6 +5819,10 @@ REV0 = 0
 REV1 = 1
 REV2 = 2
 REV3 = 3  # Ring buffer format (2024+ firmware)
+# The model field of the classic REV0 (0x27f) and REV1 (0x26C) header block:
+# 16 bytes, the model text then zero padding. Values seen run up to 5
+# characters (DSRBF, FXE11, FXS11); see analysis/legacy_mbb_header_fields.md.
+CLASSIC_MODEL_FIELD_LENGTH = 16
 REV_UNKNOWN = -1  # No legacy VIN offset validated and no ring-buffer marker found;
                   # distinct from REV0 so these files aren't silently counted as
                   # successfully-identified REV0 logs. Sorts before REV0-REV3 but
@@ -6439,7 +6443,7 @@ class LogData(object):
                     sys_info['VIN'] = header_vin = vin_v0
                     sys_info['Firmware rev.'] = log.unpack('uint16', 0x27b)
                     sys_info['Board rev.'] = log.unpack('uint16', 0x27d)
-                    model_offset = 0x27f
+                    model_offset, model_count = 0x27f, CLASSIC_MODEL_FIELD_LENGTH
                 elif is_vin(vin_v1):
                     log_version = REV1
                     sys_info['Serial number'] = log.unpack_str(0x210, count=13)
@@ -6455,14 +6459,16 @@ class LogData(object):
                         sys_info['Board rev.'] = log.unpack('uint16', 0x268)
                     except Exception:
                         sys_info['Board rev.'] = 'Unknown'
-                    model_offset = 0x26B
+                    # 0x26B is a lead byte (0xaa, or 0x41 on board rev. 420),
+                    # not part of the model: the model starts at 0x26C.
+                    model_offset, model_count = 0x26C, CLASSIC_MODEL_FIELD_LENGTH
                 elif is_vin(vin_v2):
                     log_version = REV2
                     sys_info['Serial number'] = log.unpack_str(0x03C, count=13)
                     sys_info['VIN'] = header_vin = vin_v2
                     sys_info['Firmware rev.'] = log.unpack_str(0x06b, count=7)
                     sys_info['Board rev.'] = log.unpack_str(0x05C, count=8)
-                    model_offset = 0x019
+                    model_offset, model_count = 0x019, 3
                 else:
                     logger.warning("Unknown Log Format")
                     # Distinct sentinel, not REV0: none of the three legacy VIN
@@ -6484,7 +6490,7 @@ class LogData(object):
                     sys_info['Serial number'] = 'Unknown'
                     sys_info['Firmware rev.'] = 'Unknown'
                     sys_info['Board rev.'] = 'Unknown'
-                    model_offset = 0x27f
+                    model_offset, model_count = 0x27f, 3
                 legacy_header = log_version != REV_UNKNOWN
 
                 name_vin = self.log_file.get_filename_vin()
@@ -6492,8 +6498,8 @@ class LogData(object):
                     logger.warning("VIN unreadable: %s", vin_v0)
                 elif name_vin and header_vin != name_vin:
                     logger.warning("VIN mismatch: header:%s filename:%s", header_vin, name_vin)
-                log.require_length(model_offset + 3, 'the model field')
-                sys_info['Model'] = log.unpack_str(model_offset, count=3)
+                log.require_length(model_offset + model_count, 'the model field')
+                sys_info['Model'] = log.unpack_str(model_offset, count=model_count)
                 sys_info['Initial date'] = log.unpack_str(0x2a, count=20)
 
             # A classic MBB header block that is in the file but not at the
@@ -6683,12 +6689,12 @@ class LogData(object):
     # standard path reads them at base 0: (VIN, serial, serial length, first
     # run date, the a0a0a0a0 fence, Firmware rev. u16, Board rev. u16, Model).
     SHIFTED_HEADER_LAYOUTS = (
-        (REV1, 0x252, 0x210, 13, 0x231, 0x200, 0x266, 0x268, 0x26B),
+        (REV1, 0x252, 0x210, 13, 0x231, 0x200, 0x266, 0x268, 0x26C),
         (REV0, 0x240, 0x200, 21, 0x220, 0x257, 0x27b, 0x27d, 0x27f),
     )
     _SHIFTED_DATE_RE = re.compile(r'[A-Z][a-z]{2} [ 0-9][0-9] [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2}')
     _SHIFTED_SERIAL_RE = re.compile(r'[A-Za-z0-9_-]{8,}')
-    _SHIFTED_MODEL_RE = re.compile(r'[A-Z0-9_]{2,3}')
+    _SHIFTED_MODEL_RE = re.compile(r'[A-Z0-9_]{2,%d}' % (CLASSIC_MODEL_FIELD_LENGTH - 1))
 
     @classmethod
     def find_shifted_classic_header(cls, raw):
@@ -6705,7 +6711,7 @@ class LogData(object):
         for base in bases:
             for (version, vin_o, serial_o, serial_n, date_o, fence_o,
                  firmware_o, board_o, model_o) in cls.SHIFTED_HEADER_LAYOUTS:
-                if base + min(serial_o, fence_o) < 0 or base + model_o + 3 > size:
+                if base + min(serial_o, fence_o) < 0 or base + model_o + CLASSIC_MODEL_FIELD_LENGTH > size:
                     continue
                 if raw[base + fence_o:base + fence_o + 4] != b'\xa0\xa0\xa0\xa0':
                     continue
@@ -6714,7 +6720,7 @@ class LogData(object):
                     continue
                 date = BinaryTools.unpack_str(raw, base + date_o, count=20)
                 serial = BinaryTools.unpack_str(raw, base + serial_o, count=serial_n)
-                model = BinaryTools.unpack_str(raw, base + model_o, count=3)
+                model = BinaryTools.unpack_str(raw, base + model_o, count=CLASSIC_MODEL_FIELD_LENGTH)
                 if not (cls._SHIFTED_DATE_RE.fullmatch(date)
                         and cls._SHIFTED_SERIAL_RE.fullmatch(serial)
                         and cls._SHIFTED_MODEL_RE.fullmatch(model)):
