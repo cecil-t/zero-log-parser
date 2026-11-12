@@ -6700,9 +6700,6 @@ class LogData(object):
     )
     _SHIFTED_DATE_RE = re.compile(r'[A-Z][a-z]{2} [ 0-9][0-9] [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2}')
     _SHIFTED_SERIAL_RE = re.compile(r'[A-Za-z0-9_-]{8,}')
-    # Written by boards that were never programmed. The standard path shows
-    # it as stored; a shifted block is accepted only on real-looking fields.
-    _SHIFTED_SERIAL_PLACEHOLDERS = frozenset({'UNINITIALIZED'})
     _SHIFTED_MODEL_RE = re.compile(r'[A-Z0-9_]{2,%d}' % (CLASSIC_MODEL_FIELD_LENGTH - 1))
 
     @classmethod
@@ -6732,7 +6729,6 @@ class LogData(object):
                 model = BinaryTools.unpack_str(raw, base + model_o, count=CLASSIC_MODEL_FIELD_LENGTH)
                 if not (cls._SHIFTED_DATE_RE.fullmatch(date)
                         and cls._SHIFTED_SERIAL_RE.fullmatch(serial)
-                        and serial.upper() not in cls._SHIFTED_SERIAL_PLACEHOLDERS
                         and cls._SHIFTED_MODEL_RE.fullmatch(model)):
                     continue
                 # The initial date of the same header image: a1a1a1a1 at
