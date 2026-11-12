@@ -82,3 +82,16 @@ def test_no_initial_date_when_the_image_start_is_cut_off():
     image is not in the file, so no date is taken from it."""
     found = LogData.find_shifted_classic_header(place(rev1_image(VIN_A), -0x100))
     assert found is not None and found['Initial date'] is None
+
+
+def test_uninitialized_serial_rejected_in_shifted_block():
+    data = place(rev0_image(VIN_B, serial=b'UNINITIALIZED'), 0x400)
+    assert LogData.find_shifted_classic_header(data) is None
+    _, header, ld = parse(data)
+    assert ld.vin_source is None
+
+
+def test_uninitialized_serial_still_shown_on_the_standard_path():
+    _, header, ld = parse(place(rev0_image(VIN_B, serial=b'UNINITIALIZED'), 0))
+    assert header['Serial number'] == 'UNINITIALIZED'
+    assert ld.vin_source == 'header'
