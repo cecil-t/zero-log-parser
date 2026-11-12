@@ -337,6 +337,74 @@ def determine_log_level(message: str) -> str:
     return 'INFO'
 
 
+# Levels set by what an event means, for events whose text would otherwise
+# reach the keyword match in determine_log_level() with the wrong level
+# (analysis/log_level_rules.md). Each pattern covers only the events of its
+# rule. Checked in order, on entries the decoder gave no level; an event that
+# matches none falls through to determine_log_level().
+EVENT_LOG_LEVEL_RULES = tuple((rule, re.compile(pattern), level) for rule, pattern, level in (
+    # CAN bus error counters: the controller retries, not a fault on its own.
+    ('can-bus-error', r'^CAN\d+ (ACK|BIT\d+|FORM|STUFF|CRC) error\b', 'WARNING'),
+    # Charger interface board on/off reports, routine where present.
+    ('cib-routine', r'^(Disabling CIB for non-timeout reason|CIB timeout: \d+ ms)', 'INFO'),
+    # A legacy charger fault ending (the "fault set" side stays ERROR).
+    ('charger-fault-cleared', r'^CHARGER \d+: [A-Za-z]+ fault cleared$', 'INFO'),
+    # Stored data unreadable, recovered by resetting to defaults.
+    ('read-failed-reset-defaults', r'^(Stats Read Failed, Resetting All Stats to Defaults'
+                                   r'|Settings Read Failed, Resetting All Settings to Defaults'
+                                   r'|Odometer Read Failed, Resetting to \d+ km)', 'WARNING'),
+    # Controller restart to clear a fault.
+    ('sevcon-restart', r'^(Restarting Sevcon to clear (cutout fault|charge Fault|Fault)'
+                       r'|Sevcon Failed To Fully Precharge)', 'WARNING'),
+    # A failed step being retried or recovered.
+    ('retrying', r'^(Attempting to recover from Charge Fault'
+                 r'|Turn off command mode on RN-?\d+ failed after \d+\s+retries, toggling reset pin'
+                 r'|Accelerometer Selftest Failed, retrying'
+                 r'|Precharge timeout on mod \d+, retrying)', 'WARNING'),
+    # Normal firmware or settings steps; "default" contains "fault".
+    ('default-word', r'^(Updating bank bootable/default settings\.\.\.'
+                     r'|bank bootable/default settings updated\.'
+                     r'|Making bank \d+ default boot bank on BMS \d+'
+                     r'|Successfully Reset Settings to Defaults)', 'INFO'),
+    # Faults or error counters being cleared.
+    ('errors-cleared', r'^(All Errors Cleared\.\.\. Restarting'
+                       r'|Faults cleared with clear_fault command'
+                       r'|Enabled bms \d+ clear faults flag'
+                       r'|Clearing fw update fw_update_failed flag'
+                       r'|JIB: Charge Tank resetting errors)', 'INFO'),
+    # Normal bootloader step; matched only on "timeout".
+    ('watchdog-setup', r'^Setting watchdog timeout to \d+ seconds to allow bootloader time to start', 'INFO'),
+    # A Gen3 fault that came and went since the last fault report.
+    ('set-and-cleared', r'^Fault set & cleared since last time faults logged: ', 'WARNING'),
+    # Contactor opened for a non-critical reason (also inside damaged text).
+    ('non-critical-contactor', r'(?i)non critical contactor open', 'WARNING'),
+    # Bluetooth module setup; not a vehicle fault.
+    ('bluetooth', r'^RN-?\d+ (configuration FAILED|autoconnect sequence failed after \d+\s+retries)', 'WARNING'),
+    # Dash communication; not a vehicle fault.
+    ('dash-comms', r'^Failed to send nav pkt to dash', 'WARNING'),
+    # Why the last reset happened: a crash stays ERROR, the others are WARNING.
+    ('soft-reset-crash', r'^\s*CPU Soft Reset:\s+Hard Fault', 'ERROR'),
+    ('soft-reset-other', r'^\s*CPU Soft Reset:\s+(Key cycle from (charge fault|critical error) shutdown'
+                         r'|Failed to Hibernate|Hibernate Aborted)', 'WARNING'),
+    # ABS warning lamp (Bosch SILA, Sicherheitslampe).
+    ('abs-sila', r'^ABS SILA reporting an error', 'WARNING'),
+))
+
+
+def event_rule_log_level(message: str):
+    """Level from EVENT_LOG_LEVEL_RULES for the event text, or None."""
+    for _rule, pattern, level in EVENT_LOG_LEVEL_RULES:
+        if pattern.search(message or ''):
+            return level
+    return None
+
+
+def event_log_level(message: str) -> str:
+    """Level for an entry the decoder gave none: the event rules, else the
+    keyword match in determine_log_level()."""
+    return event_rule_log_level(message) or determine_log_level(message)
+
+
 # noinspection PyMissingOrEmptyDocstring
 class BinaryTools:
     """
@@ -5516,7 +5584,7 @@ class Gen2:
                 entry['event'] = improved_event
                 entry['conditions'] = improved_conditions
             if not entry.get('log_level'):
-                entry['log_level'] = determine_log_level(entry.get('event', ''))
+                entry['log_level'] = event_log_level(entry.get('event', ''))
             entry['message_type'] = f"0x{message_type:X}"
             add(entry, (start, length))
 
@@ -5593,7 +5661,7 @@ class Gen2:
             entry['conditions'] = improved_conditions  # Store the improved conditions
 
         if not entry.get('log_level'):
-            entry['log_level'] = determine_log_level(entry.get('event', ''))
+            entry['log_level'] = event_log_level(entry.get('event', ''))
 
         # Always store the numeric message type ID
         entry['message_type'] = f"0x{message_type:X}"
@@ -5829,7 +5897,7 @@ class Gen3:
             conditions_str = event_conditions
         # Apply improved message parsing and determine log level
         improved_event, improved_conditions, json_data, has_json_data, was_modified, modification_type = improve_message_parsing(event_message, conditions_str, verbosity_level=verbosity_level, logger=logger)
-        log_level = determine_log_level(improved_event)
+        log_level = event_log_level(improved_event)
         # Gen3 entries don't have numeric message types, so use "gen3" as identifier
         message_type = "gen3"
 

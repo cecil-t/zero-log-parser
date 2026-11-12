@@ -63,8 +63,9 @@ def test_withheld_fault_state_falls_back_to_the_text():
 
 
 def test_non_fault_messages_keep_their_level():
-    """Messages that are not fault state text are left to determine_log_level()
-    (or their explicit level) as before, including the "set & cleared" form."""
+    """Messages that are not fault state text get no level here, including
+    the "set & cleared" form; their level comes later from the event rules or
+    determine_log_level() (or their explicit level)."""
     for text in ('CAN1 ACK error. count=12',
                  'Fault set & cleared since last time faults logged: HVIL_OPEN',
                  'Updating bank bootable/default settings...'):
