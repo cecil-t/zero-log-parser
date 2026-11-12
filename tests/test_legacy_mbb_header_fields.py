@@ -57,3 +57,28 @@ def test_shifted_path_reads_the_same_model_as_the_standard_path():
     _, standard, _ = parse(place(rev0_image(VIN_B, model=b'FXS11'), 0))
     _, shifted, _ = parse(place(rev0_image(VIN_B, model=b'FXS11'), 0x400))
     assert shifted['Model'] == standard['Model'] == 'FXS11'
+
+
+def test_shifted_block_initial_date_replaces_junk_at_0x2a():
+    """A 131,072-byte file with the REV0 header image at +0x400: the fixed
+    0x2a read finds log text, the shifted image has the date."""
+    buf = bytearray(place(rev0_image(VIN_B), 0x400, size=0x20000))
+    buf[0x2a:0x3a] = b'are now Closed\x00\x00'
+    _, header, ld = parse(bytes(buf))
+    assert ld.vin_source == 'header'
+    assert header['Initial date'] == 'Mar  3 2015 10:11:12'
+    assert LogData.find_shifted_classic_header(bytes(buf))['Initial date'] == 'Mar  3 2015 10:11:12'
+
+
+def test_valid_initial_date_already_read_is_kept():
+    buf = bytearray(place(rev0_image(VIN_B), 0x400, size=0x20000))
+    buf[0x2a:0x3e] = b'Apr  4 2016 01:02:03'
+    _, header, _ = parse(bytes(buf))
+    assert header['Initial date'] == 'Apr  4 2016 01:02:03'
+
+
+def test_no_initial_date_when_the_image_start_is_cut_off():
+    """Capture starting after flash 0: the a1a1a1a1 fence of the shifted
+    image is not in the file, so no date is taken from it."""
+    found = LogData.find_shifted_classic_header(place(rev1_image(VIN_A), -0x100))
+    assert found is not None and found['Initial date'] is None
