@@ -4455,8 +4455,60 @@ class LogData(object):
 
         return filtered_entries
 
+    # Classic MBB header block layouts, offsets from the block base as the
+    # standard path reads them at base 0: (VIN, serial, serial length, first
+    # run date, the a0a0a0a0 fence, Firmware rev. u16, Board rev. u16, Model).
+    SHIFTED_HEADER_LAYOUTS = (
+        (REV1, 0x252, 0x210, 13, 0x231, 0x200, 0x266, 0x268, 0x26C),
+        (REV0, 0x240, 0x200, 21, 0x220, 0x257, 0x27b, 0x27d, 0x27f),
+    )
+    _SHIFTED_DATE_RE = re.compile(r'[A-Z][a-z]{2} [ 0-9][0-9] [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2}')
+    _SHIFTED_SERIAL_RE = re.compile(r'[A-Za-z0-9_-]{8,}')
+    _SHIFTED_MODEL_RE = re.compile(r'[A-Z0-9_]{2,%d}' % (CLASSIC_MODEL_FIELD_LENGTH - 1))
+
+    @classmethod
+    def find_shifted_classic_header(cls, raw):
+        """The fields of a classic MBB header block found at a 0x100-aligned
+        base other than 0, or None. Bases are tried nearest to 0 first. A
+        block is accepted only when every neighbouring field has the shape
+        the standard layout has: the a0a0a0a0 fence, a VIN that passes the
+        check digit, a first run date, a serial number and a model. Where a
+        file holds more than one such block, all copies seen in real files
+        carry the same values."""
+        size = len(raw)
+        bases = sorted((b for b in range(-0x200, size, 0x100) if b != 0),
+                       key=lambda b: (abs(b), b < 0))
+        for base in bases:
+            for (version, vin_o, serial_o, serial_n, date_o, fence_o,
+                 firmware_o, board_o, model_o) in cls.SHIFTED_HEADER_LAYOUTS:
+                if base + min(serial_o, fence_o) < 0 or base + model_o + CLASSIC_MODEL_FIELD_LENGTH > size:
+                    continue
+                if raw[base + fence_o:base + fence_o + 4] != b'\xa0\xa0\xa0\xa0':
+                    continue
+                vin = BinaryTools.unpack_str(raw, base + vin_o, count=17)
+                if not is_valid_vin_checksum(vin):
+                    continue
+                date = BinaryTools.unpack_str(raw, base + date_o, count=20)
+                serial = BinaryTools.unpack_str(raw, base + serial_o, count=serial_n)
+                model = BinaryTools.unpack_str(raw, base + model_o, count=CLASSIC_MODEL_FIELD_LENGTH)
+                if not (cls._SHIFTED_DATE_RE.fullmatch(date)
+                        and cls._SHIFTED_SERIAL_RE.fullmatch(serial)
+                        and cls._SHIFTED_MODEL_RE.fullmatch(model)):
+                    continue
+                return OrderedDict([
+                    ('layout', version),
+                    ('base', base),
+                    ('Serial number', serial),
+                    ('VIN', vin),
+                    ('Firmware rev.', BinaryTools.unpack('uint16', raw, base + firmware_o)),
+                    ('Board rev.', BinaryTools.unpack('uint16', raw, base + board_o)),
+                    ('Model', model),
+                ])
+        return None
+
     def get_version_and_header(self, log: LogFile):
         logger = logger_for_input(self.log_file.file_path)
+        header_vin = None   # a VIN read from the file's own header, if any
         sys_info = OrderedDict()
         log_version = REV0
         if len(sys_info) == 0 and (self.log_file.is_mbb() or self.log_file.is_unknown()):
@@ -4609,6 +4661,7 @@ class LogData(object):
                     sys_info['Firmware rev.'] = 'Unknown'
                     sys_info['Board rev.'] = 'Unknown'
                     sys_info['Firmware build'] = 'Unknown'
+                header_vin = gen3_vin
 
                 # Prefer entry type 0xfb's own decode when it's available.
                 # The fixed offsets above read raw file bytes directly,
@@ -4644,6 +4697,7 @@ class LogData(object):
                             fb_entry = Gen2.mbb_system_information(unescaped[5:])
                             fb_data = fb_entry.get('structured_data')
                             if fb_data:
+                                header_vin = fb_data['vin']
                                 sys_info['VIN'] = fb_data['vin']
                                 sys_info['Model'] = fb_data['model']
                                 sys_info['Board rev.'] = fb_data['board_rev']
@@ -4659,14 +4713,14 @@ class LogData(object):
                 if is_vin(vin_v0):
                     log_version = REV0
                     sys_info['Serial number'] = log.unpack_str(0x200, count=21)
-                    sys_info['VIN'] = vin_v0
+                    sys_info['VIN'] = header_vin = vin_v0
                     sys_info['Firmware rev.'] = log.unpack('uint16', 0x27b)
                     sys_info['Board rev.'] = log.unpack('uint16', 0x27d)
                     model_offset, model_count = 0x27f, CLASSIC_MODEL_FIELD_LENGTH
                 elif is_vin(vin_v1):
                     log_version = REV1
                     sys_info['Serial number'] = log.unpack_str(0x210, count=13)
-                    sys_info['VIN'] = vin_v1
+                    sys_info['VIN'] = header_vin = vin_v1
                     sys_info['Firmware rev.'] = log.unpack('uint16', 0x266)
                     # uint16 @ 0x268, directly after Firmware rev., mirroring
                     # REV0's own Firmware rev./Board rev. layout. Confirmed
@@ -4684,7 +4738,7 @@ class LogData(object):
                 elif is_vin(vin_v2):
                     log_version = REV2
                     sys_info['Serial number'] = log.unpack_str(0x03C, count=13)
-                    sys_info['VIN'] = vin_v2
+                    sys_info['VIN'] = header_vin = vin_v2
                     sys_info['Firmware rev.'] = log.unpack_str(0x06b, count=7)
                     sys_info['Board rev.'] = log.unpack_str(0x05C, count=8)
                     model_offset, model_count = 0x019, 3
@@ -4718,6 +4772,24 @@ class LogData(object):
                                    filename_vin)
                 sys_info['Model'] = log.unpack_str(model_offset, count=model_count)
                 sys_info['Initial date'] = log.unpack_str(0x2a, count=20)
+
+            # A classic MBB header block that is in the file but not at the
+            # standard offsets: the capture window starts a multiple of 0x100
+            # bytes before or after flash address 0, the header image sits
+            # near the end of a rotated capture, or a 131,072-byte file keeps
+            # the block at 0x800 (see find_shifted_classic_header). Tried only
+            # when no header VIN was found above, and never on an FST/Gen3
+            # file (0xb2, a length byte, then a type 0xfb system information
+            # entry at 0). Only the header fields change: log_version and the
+            # entry walk stay as they were, because the entries header's ring
+            # pointers are not adjusted for the shift.
+            raw = log.raw()
+            if header_vin is None and not (len(raw) > 2 and raw[0] == 0xb2 and raw[2] == 0xfb):
+                shifted = self.find_shifted_classic_header(raw)
+                if shifted is not None:
+                    header_vin = shifted['VIN']
+                    for key in ('Serial number', 'VIN', 'Firmware rev.', 'Board rev.', 'Model'):
+                        sys_info[key] = shifted[key]
         if len(sys_info) == 0 and (self.log_file.is_bms() or self.log_file.is_unknown()):
             # Ring buffer format (2024+ firmware) files start directly with
             # log entries, the same board-agnostic 0xb2 marker the MBB
