@@ -2315,13 +2315,35 @@ class Gen2:
             return {
                 'event': improved_event,
                 'conditions': improved_conditions,
-                'log_level': log_level,
+                'log_level': cls.fault_state_log_level(improved_event, gen3_structured) or log_level,
                 'structured_data': gen3_structured
             }
         return {
             'event': message,
-            'log_level': log_level
+            'log_level': cls.fault_state_log_level(message) or log_level
         }
+
+    # Gen3 fault text, "Fault set|pending|cleared: NAME": the level follows the
+    # fault state instead of the FAULT keyword in determine_log_level(), which
+    # made every state ERROR. A fault that is set is active; a pending one
+    # will set unless it clears in time; a cleared one has ended.
+    FAULT_STATE_LOG_LEVELS = {'set': 'ERROR', 'pending': 'WARNING', 'cleared': 'INFO'}
+    _FAULT_STATE_TEXT = re.compile(r'Fault (set|pending|cleared): ')
+
+    @classmethod
+    def fault_state_log_level(cls, event, structured=None):
+        """The level for a fault state entry, or None for any other entry. The
+        state comes from the parsed text (structured_data fault_state, which a
+        restored line also carries), else from the event text itself when it
+        starts with the fault prefix (a fault code the table does not know, or
+        a fault_state withheld under a page marker)."""
+        state = None
+        if isinstance(structured, dict) and structured.get('text_event') == 'fault':
+            state = structured.get('fault_state')
+        if state is None:
+            m = cls._FAULT_STATE_TEXT.match(event or '')
+            state = m.group(1) if m else None
+        return cls.FAULT_STATE_LOG_LEVELS.get(state)
 
     @classmethod
     def board_status(cls, x):
