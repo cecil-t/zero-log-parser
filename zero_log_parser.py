@@ -4160,8 +4160,10 @@ class Gen2:
         0x52: ('medium', (81, 85), 39),
         0x53: ('large', (93, 95, 99), 43),
     }
+    # LIMP: seen in 0x51 records of two Gen3 MBB files (analysis/gen3_declined.md);
+    # shown as written, no meaning attached.
     TELEMETRY_TAGS = frozenset(
-        ['RUN', 'PWSU', 'CHRG', 'WAIT', 'STOP', 'HIB', 'WAKE', 'FWUP', 'STRT', 'REV', 'PARK'])
+        ['RUN', 'PWSU', 'CHRG', 'WAIT', 'STOP', 'HIB', 'WAKE', 'FWUP', 'STRT', 'REV', 'PARK', 'LIMP'])
 
     @classmethod
     def vehicle_state_telemetry_tier(cls, message_type, x, firmware=None, timestamp=None):

@@ -198,3 +198,16 @@ def test_short_0x4d_and_0x4c_decode_the_head_and_leave_the_tail_raw():
         assert sd['raw_hex'] == bytes(payload).hex()     # the tail is kept, undecoded
         kinds = {i: k for a, b, k, _ in Gen2.payload_layout(message_type, length) for i in range(a, b)}
         assert all(kinds[i] == Gen2.LAYOUT_UNKNOWN for i in range(head, length))
+
+
+# --- Step 5: the LIMP state tag on 0x51 ---
+
+def test_0x51_with_state_tag_limp_decodes_and_shows_it_as_written():
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from test_vehicle_state_telemetry_decode import _payload, _tag
+    for length in (64, 68):
+        out = Gen2.vehicle_state_telemetry(_payload(length, _tag('LIMP')))
+        assert out['structured_data']['vehicle_state'] == 'LIMP', length
+        assert out['event'] == 'Vehicle State (LIMP)'
+        assert out['conditions'].startswith('State: LIMP, ')
+    assert 'structured_data' not in Gen2.vehicle_state_telemetry(_payload(68, _tag('LIMB')))
