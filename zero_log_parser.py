@@ -5118,6 +5118,9 @@ class Gen2:
     # where it lands decides what the decoder sees:
     #   - on payload bytes 0-3, the sub-second prefix reads far out of range,
     #     so the sub-second check declines a record that is otherwise intact.
+    #   - on an 0xfe escape byte, its pair no longer combines, so the record
+    #     unescapes one byte longer than its real length and the length check
+    #     declines it; every byte after the marker sits one place late.
     # Only the paged walker calls this, with the marker's own position in the
     # file, so a repair is made only where the marker explains the decline.
     MARKER_REPAIR_TYPES = frozenset([0x4b, 0x4c, 0x4d])
@@ -5202,13 +5205,65 @@ class Gen2:
         return entry
 
     @classmethod
+    def _fields_touching(cls, entry_parser, payload, lo, hi, baseline):
+        """The structured fields of a decoded payload whose bytes include any
+        of payload[lo:hi]: prefix fields by their byte ranges, every other
+        field by redecoding with that range filled with 0x00 and then 0xAA
+        (the prefix bytes are left alone, so the sub-second stays in range)
+        and comparing with the baseline fields. None when a filled decode is
+        declined, since the fields then cannot be told apart."""
+        touched = {name for name, a, b in cls.PREFIX_FIELD_BYTES if a < hi and lo < b}
+        body_lo = max(lo, cls.PREFIX_FIELD_BYTES[-1][2])
+        if body_lo >= hi:
+            return touched
+        missing = object()
+        for filler in (0x00, 0xAA):
+            modified = bytearray(payload)
+            modified[body_lo:hi] = bytes([filler]) * (hi - body_lo)
+            fields = dict(cls._enumerate_structured_fields(entry_parser(modified).get('structured_data') or {}))
+            if not fields:
+                return None
+            for path in set(baseline) | set(fields):
+                if baseline.get(path, missing) != fields.get(path, missing):
+                    touched.add(path)
+        return touched
+
+    @classmethod
+    def _repair_marker_extra_byte(cls, message_type, message, spans, entry_parser):
+        """A record one byte longer than a valid length with a marker over
+        part of its payload: the marker overwrote an escape byte, so drop one
+        byte inside the marker's span, decode at the valid length and withhold
+        every field that touches the span or the byte either side of it.
+        Returns the entry, or None when the marker does not explain the
+        extra byte or the fields cannot be placed."""
+        if len(message) - 1 not in cls.BMS_CELL_TELEMETRY_TIERS[message_type][1]:
+            return None
+        span = next(((max(lo, 0), min(hi, len(message))) for lo, hi, _ in spans
+                     if max(lo, 0) < min(hi, len(message))), None)
+        if span is None:
+            return None
+        lo, hi = span
+        realigned = bytearray(message[:lo] + message[lo + 1:])
+        entry = entry_parser(realigned)
+        structured_data = entry.get('structured_data')
+        if not structured_data:
+            return None
+        baseline = dict(cls._enumerate_structured_fields(structured_data))
+        touched = cls._fields_touching(entry_parser, realigned, max(lo - 1, 0), min(hi, len(realigned)), baseline)
+        if touched is None:
+            return None
+        cls._withhold_payload_fields(structured_data, touched)
+        return entry
+
+    @classmethod
     def _repair_marker_damage(cls, message_type, message, buf, start, end, entry_parser):
         """The marker repairs above, tried in turn for a declined 0x4B/0x4C/0x4D
         record in a paged BMS file; None when no marker explains the decline."""
         spans = cls._marker_payload_spans(buf, start, end)
         if not spans:
             return None
-        return cls._repair_marker_prefix(message_type, message, spans, entry_parser)
+        return (cls._repair_marker_prefix(message_type, message, spans, entry_parser)
+                or cls._repair_marker_extra_byte(message_type, message, spans, entry_parser))
 
     @classmethod
     def _withhold_marker_corrupted_fields(cls, structured_data, entry_parser, buf, start, end, message_type):

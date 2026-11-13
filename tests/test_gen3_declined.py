@@ -88,3 +88,61 @@ def test_out_of_range_sub_second_without_a_marker_stays_declined():
     entry = _decode_one(_entry(0x4b, T, payload))
     assert entry.get('structured_data') is None
     assert entry['conditions'].startswith('Raw data: ')
+
+
+# --- Step 2: one byte longer, the marker over an escape byte ---
+
+def _escape(body):
+    """The writer's escaping: 0xfe -> fe 01, 0xb2 -> fe 4d (unescape_block's inverse)."""
+    out = bytearray()
+    for b in body:
+        out += b'\xfe\x01' if b == 0xfe else b'\xfe\x4d' if b == 0xb2 else bytes([b])
+    return out
+
+
+def _marked_record(message_type, payload, k):
+    """The wire form of a record whose payload byte k is 0xb2 (escaped as a
+    pair), with the page marker written over that pair and the two bytes
+    after it: the pair no longer combines, so it unescapes one byte long."""
+    payload = bytearray(payload)
+    payload[k] = 0xb2
+    escaped = _escape(bytes([message_type]) + struct.pack('<I', T) + bytes(payload))
+    e = escaped.index(b'\xfe\x4d')
+    escaped[e:e + 4] = MARK
+    return bytearray([0xb2, len(escaped) + 2]) + escaped
+
+
+def test_record_one_byte_long_is_realigned_and_the_fields_by_the_marker_withheld():
+    # The marker over payload bytes 21-24 (battery current), starting at its
+    # first, second and last byte. Fields touching the marker span or the
+    # byte either side of it are withheld; fields after it read at their
+    # real offsets, which shows the extra byte was taken out.
+    cases = {
+        21: {'state_of_charge_percent', 'battery_current_amps'},
+        22: {'battery_current_amps'},
+        24: {'battery_current_amps', 'bms_temperature_c', 'bms_status_word'},
+    }
+    for k, must in cases.items():
+        entry = _decode_one(_marked_record(0x4b, _cell_payload(), k))
+        sd = entry['structured_data']
+        assert entry['event'] == 'BMS Cell Telemetry', k
+        assert len(bytes.fromhex(sd['raw_hex'])) == 43, k
+        assert must <= set(sd['corrupted_fields']), (k, sd['corrupted_fields'])
+        for name in sd['corrupted_fields']:
+            assert sd[name] is None
+        assert sd['voltage_low_cell_volts'] == 3.811 and sd['voltage_high_cell_volts'] == 3.829
+        assert sd['pack_voltage_volts'] == 104.567, k
+        assert sd['bms_report_mode'] == 7, k
+        assert sd['subsecond_us'] == 432_000 and sd['sequence'] == 17
+
+
+def test_record_one_byte_long_with_the_marker_on_the_cell_block_of_a_0x4d():
+    entry = _decode_one(_marked_record(0x4d, _cell_payload(length=69, shift=8), 23))
+    sd = entry['structured_data']
+    assert {'voltage_low_cell_volts', 'voltage_unloaded_cell_volts'} <= set(sd['corrupted_fields'])
+    assert sd['state_of_charge_percent'] == 63 and sd['pack_voltage_volts'] == 104.567
+
+
+def test_record_one_byte_long_without_a_marker_stays_declined():
+    entry = _decode_one(_entry(0x4b, T, _cell_payload(length=44)))
+    assert entry.get('structured_data') is None
