@@ -211,3 +211,40 @@ def test_0x51_with_state_tag_limp_decodes_and_shows_it_as_written():
         assert out['event'] == 'Vehicle State (LIMP)'
         assert out['conditions'].startswith('State: LIMP, ')
     assert 'structured_data' not in Gen2.vehicle_state_telemetry(_payload(68, _tag('LIMB')))
+
+
+# --- Step 6: the BMS 0xFB system information record as an entry ---
+
+def _bms_fb_payload(shift=0):
+    """An invented BMS 0xfb payload, laid out at the header offsets that
+    fst_bms_header_fields() reads (header offset = payload offset + 7);
+    shift -1 drops a byte before the device name, +1 adds one after it."""
+    h = bytearray(0x6c + 7)
+    h[0x0d:0x11] = b'BMS\x00'
+    for offset, text in ((0x17, b'FST Test'), (0x28, b'40-01234-05'), (0x38, b'tt0000zzz9999'),
+                         (0x48, b'bcbm0001'), (0x58, b'75-01234')):
+        h[offset:offset + len(text)] = text
+    struct.pack_into('<HH', h, 0x68, 21, 4321)
+    payload = h[7:]
+    if shift == -1:
+        payload = payload[:4] + payload[5:]
+    elif shift == 1:
+        payload = payload[:0x12 - 7] + b'\x00' + payload[0x12 - 7:]
+    return bytearray(payload)
+
+
+def test_bms_system_information_decodes_with_the_header_fields_and_part_number():
+    for shift in (0, -1, 1):
+        entry = Gen2.mbb_system_information(_bms_fb_payload(shift))
+        assert entry['event'] == 'BMS System Information', shift
+        assert entry['structured_data'] == {
+            'module_model': 'FST Test', 'part_number': '40-01234-05', 'bms_serial_number': 'tt0000zzz9999',
+            'bcbm_id': 'bcbm0001', 'firmware_part': '75-01234', 'firmware_rev': 21, 'firmware_build': 4321}, shift
+        assert entry['conditions'].startswith('Module: FST Test, Part: 40-01234-05, ')
+
+
+def test_bms_system_information_without_a_confirmed_shift_stays_raw():
+    payload = _bms_fb_payload()
+    payload[0x58 - 7:0x58 - 7 + 8] = b'xx-yyyyy'          # the firmware part anchor is gone
+    entry = Gen2.mbb_system_information(payload)
+    assert 'structured_data' not in entry and entry['conditions'].startswith('Raw data:')

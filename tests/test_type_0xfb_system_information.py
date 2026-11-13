@@ -109,15 +109,14 @@ def test_escape_byte_file_decodes_board_and_firmware_rev_correctly():
     assert e['structured_data']['serial_number'] == 'sj4018zer0462'
 
 
-def test_real_bms_payload_falls_back_to_raw_hex():
+def test_real_bms_payload_decodes_as_bms_system_information():
+    # The BMS's own record is read with the header's field reader
+    # (Gen2.bms_system_information); see tests/test_gen3_declined.py.
     e = Gen2.mbb_system_information(REAL_BMS)
-    assert 'structured_data' not in e
-    assert e['conditions'].startswith('Raw data:')
-    # description still comes from get_message_type_description(), the
-    # same event label an unregistered type would have carried before
-    # this decoder existed - this proves the fallback is unchanged, not
-    # a new or different generic report.
-    assert e['event'] == Gen2.get_message_type_description(0xfb)
+    assert e['event'] == 'BMS System Information'
+    sd = e['structured_data']
+    assert (sd['module_model'], sd['part_number'], sd['firmware_part']) == ('FST Mono', '40-08184-01', '75-08156')
+    assert 'vin' not in sd
 
 
 def test_garbled_identifier_falls_back_to_raw_hex():
@@ -239,4 +238,5 @@ def test_parse_entry_end_to_end_mbb_and_bms_payloads():
 
     raw_bms = _raw_entry(0xfb, REAL_BMS)
     _length, entry, _unhandled = Gen2.parse_entry(raw_bms, 0, 0, logger, log_type=LogFile.log_type_bms)
-    assert 'structured_data' not in entry
+    assert entry['event'] == 'BMS System Information'
+    assert 'vin' not in entry['structured_data']

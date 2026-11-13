@@ -1446,6 +1446,50 @@ class Gen2:
             'conditions': 'vpack: {v:.3f}V, thr_en: {t:.3f}V'.format(v=vpack_volt, t=thr_en_volt),
         }
 
+    # The BMS's own 0xfb record ('BMS\0' where the MBB's has 'MBB\0') is the
+    # first entry of every Gen3 BMS file, the one the file header is read
+    # from. As an entry it shows the same fields fst_bms_header_fields()
+    # reads, plus the board part number (NN-NNNNN-NN, 16 bytes at header
+    # offset 0x28, one byte off with the same shift as the other fields).
+    BMS_SYSTEM_INFORMATION_KEYS = (
+        ('Module model', 'module_model'), ('BMS serial number', 'bms_serial_number'),
+        ('BCBM id', 'bcbm_id'), ('Firmware part', 'firmware_part'),
+        ('Firmware rev.', 'firmware_rev'), ('Firmware build', 'firmware_build'))
+    BMS_PART_NUMBER_OFFSET = 0x28
+    BMS_PART_NUMBER_RE = re.compile(r'\d\d-\d{5}-\d\d')
+
+    @classmethod
+    def bms_system_information(cls, x):
+        """Type 0xfb written by a Gen3 BMS, decoded with the header's own
+        field reader; None when the payload is not a BMS record or its field
+        shift cannot be confirmed (fst_bms_header_shift)."""
+        header = b'\xb2\x00\xfb\x00\x00\x00\x00' + bytes(x)    # payload offset + 7 = header offset
+        if cls.fst_device_name(header) != 'BMS':
+            return None
+        shift = cls.fst_bms_header_shift(header)
+        fields = dict(cls.fst_bms_header_fields(header))
+        if shift is None or not fields:
+            return None
+        structured_data = {}
+        names = dict(cls.BMS_SYSTEM_INFORMATION_KEYS)
+        if 'Module model' in fields:
+            structured_data['module_model'] = fields.pop('Module model')
+        chunk = header[cls.BMS_PART_NUMBER_OFFSET + shift:cls.BMS_PART_NUMBER_OFFSET + shift + 16]
+        if b'\x00' in chunk:
+            text = chunk.split(b'\x00')[0].decode('ascii', 'replace')
+            if cls.BMS_PART_NUMBER_RE.fullmatch(text):
+                structured_data['part_number'] = text
+        for key, value in fields.items():
+            structured_data[names[key]] = value
+        labels = (('module_model', 'Module'), ('part_number', 'Part'), ('bms_serial_number', 'Serial'),
+                  ('bcbm_id', 'BCBM id'), ('firmware_part', 'Firmware part'), ('firmware_rev', 'Firmware rev.'))
+        conditions = ', '.join(f'{label}: {structured_data[k]}' for k, label in labels if k in structured_data)
+        return {
+            'event': 'BMS System Information',
+            'structured_data': structured_data,
+            'conditions': conditions,
+        }
+
     @classmethod
     def mbb_system_information(cls, x):
         """Type 0xfb "System Information". LOG_STRUCTURE.md documents this
@@ -1489,7 +1533,7 @@ class Gen2:
                 shift = candidate_shift
                 break
         if shift is None:
-            return cls.unhandled_entry_format(0xfb, x)
+            return cls.bms_system_information(x) or cls.unhandled_entry_format(0xfb, x)
 
         try:
             vin_candidate = BinaryTools.unpack_str(x, 34 + shift, count=vin_length)
@@ -5552,6 +5596,17 @@ class Gen2:
         return cls.fst_device_name(header) or cls.fst_board_from_entry_types(raw)
 
     @classmethod
+    def fst_bms_header_shift(cls, header):
+        """The one-byte shift (0, -1 or +1) of an un-escaped FST/Gen3 BMS
+        header entry, taken from the firmware part field (see
+        fst_bms_header_fields), or None when it is not found."""
+        for candidate in (0, -1, 1):
+            start = 0x58 + candidate
+            if cls.FST_BMS_ANCHOR.match(header, start, start + 16):
+                return candidate
+        return None
+
+    @classmethod
     def fst_bms_header_fields(cls, header):
         """The BMS fields of an un-escaped FST/Gen3 BMS header entry, as an
         ordered list of (header key, value). Readable fields only: a field is
@@ -5565,12 +5620,7 @@ class Gen2:
         rather than values read at a guessed position. Text fields must be
         printable and NUL-terminated inside the field; a text field that
         fails, or a number past the end of the entry, is left out."""
-        shift = None
-        for candidate in (0, -1, 1):
-            start = 0x58 + candidate
-            if cls.FST_BMS_ANCHOR.match(header, start, start + 16):
-                shift = candidate
-                break
+        shift = cls.fst_bms_header_shift(header)
         if shift is None:
             return []
         fields = []
@@ -6765,7 +6815,7 @@ class LogData(object):
                         if len(unescaped) >= 6 and unescaped[0] == 0xfb:
                             fb_entry = Gen2.mbb_system_information(unescaped[5:])
                             fb_data = fb_entry.get('structured_data')
-                            if fb_data:
+                            if fb_data and 'vin' in fb_data:     # the MBB record (a BMS one has no VIN)
                                 header_vin = fb_data['vin']
                                 sys_info['VIN'] = fb_data['vin']
                                 sys_info['Model'] = fb_data['model']

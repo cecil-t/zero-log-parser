@@ -174,7 +174,8 @@ def test_gen3_bms_shifted_header_has_no_pack_serial():
     ld, txt, js = _parse(_gen3_bms_file(header), 'synthetic.bin')
     assert ld.log_file.log_type == 'BMS'
     assert 'Pack serial number' not in ld.header_info
-    assert '40-00000-01' not in txt
+    # not in the header block (the 0xfb entry line further down shows it as the part number)
+    assert '40-00000-01' not in txt.split('Printing ')[0]
     assert js['log_info']['pack_serial_number'] is None
 
 
