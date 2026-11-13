@@ -5112,6 +5112,104 @@ class Gen2:
             node = node[p]
         node[parts[-1]] = value
 
+    # Gen3 BMS cell telemetry (0x4B/0x4C/0x4D) records that the 128-byte page
+    # marker damaged in a way bms_cell_telemetry() cannot accept on its own
+    # (analysis/gen3_declined.md). The marker overwrites four bytes in place;
+    # where it lands decides what the decoder sees:
+    #   - on payload bytes 0-3, the sub-second prefix reads far out of range,
+    #     so the sub-second check declines a record that is otherwise intact.
+    # Only the paged walker calls this, with the marker's own position in the
+    # file, so a repair is made only where the marker explains the decline.
+    MARKER_REPAIR_TYPES = frozenset([0x4b, 0x4c, 0x4d])
+    # The shared 6-byte prefix (fst_entry_prefix): (field, first byte, end).
+    PREFIX_FIELD_BYTES = (('subsecond_us', 0, 4), ('sequence', 4, 5), ('marker', 5, 6))
+
+    @staticmethod
+    def _unescaped_index_map(escaped):
+        """For every byte of an escaped entry body, its index in the
+        unescaped block: both bytes of an 0xfe escape pair map to the one
+        byte they decode to (unescape_block pairs them left to right)."""
+        out = []
+        i = j = 0
+        while i < len(escaped):
+            if escaped[i] == 0xfe and i + 1 < len(escaped):
+                out.extend((j, j))
+                i += 2
+            else:
+                out.append(j)
+                i += 1
+            j += 1
+        return out
+
+    @classmethod
+    def _marker_payload_spans(cls, buf, start, end):
+        """Every page marker that overlaps the entry at buf[start:end], as
+        (lo, hi, whole): its [lo, hi) range in payload offsets (the unescaped
+        block from byte 5 on; negative where it covers the type or timestamp)
+        and whether all four marker bytes lie inside the entry body."""
+        escaped_start = start + 2
+        escaped = bytes(buf[escaped_start:end])
+        if not escaped:
+            return []
+        index = cls._unescaped_index_map(escaped)
+        window_start = max(0, escaped_start - 3)
+        window = bytes(buf[window_start:end + 3])
+        spans = []
+        pos = window.find(cls.PAGE_MARKER)
+        while pos != -1:
+            rel = window_start + pos - escaped_start
+            lo, hi = max(0, rel), min(len(escaped), rel + 4)
+            if hi > lo:
+                spans.append((index[lo] - 5, index[hi - 1] - 4, rel >= 0 and rel + 4 <= len(escaped)))
+            pos = window.find(cls.PAGE_MARKER, pos + 1)
+        return spans
+
+    @classmethod
+    def _withhold_payload_fields(cls, structured_data, names):
+        """Withhold the named fields (set them to None) and list them in
+        corrupted_fields, the same way _withhold_marker_corrupted_fields does;
+        with no names (the marker covered no decoded field) nothing is set."""
+        if not names:
+            return
+        for path in names:
+            cls._set_structured_field(structured_data, path, None)
+        structured_data['corrupted_fields'] = sorted(names)
+
+    @classmethod
+    def _repair_marker_prefix(cls, message_type, message, spans, entry_parser):
+        """A record at a valid length whose sub-second is out of range because
+        a whole marker sits at payload offset 0, 1 or 2: decode it with the
+        marker bytes zeroed and withhold the prefix fields the marker covers.
+        Returns the entry, or None when the marker does not explain the
+        decline."""
+        if len(message) not in cls.BMS_CELL_TELEMETRY_TIERS[message_type][1]:
+            return None
+        if cls.fst_entry_prefix(message)['subsecond_us'] <= cls.FST_SUBSECOND_MAX_US:
+            return None
+        span = next(((lo, hi) for lo, hi, whole in spans if whole and 0 <= lo <= 2), None)
+        if span is None:
+            return None
+        lo, hi = span
+        neutral = bytearray(message)
+        neutral[lo:hi] = bytes(hi - lo)
+        entry = entry_parser(neutral)
+        structured_data = entry.get('structured_data')
+        if not structured_data:
+            return None
+        structured_data['raw_hex'] = bytes(message).hex()
+        cls._withhold_payload_fields(
+            structured_data, [name for name, a, b in cls.PREFIX_FIELD_BYTES if a < hi and lo < b])
+        return entry
+
+    @classmethod
+    def _repair_marker_damage(cls, message_type, message, buf, start, end, entry_parser):
+        """The marker repairs above, tried in turn for a declined 0x4B/0x4C/0x4D
+        record in a paged BMS file; None when no marker explains the decline."""
+        spans = cls._marker_payload_spans(buf, start, end)
+        if not spans:
+            return None
+        return cls._repair_marker_prefix(message_type, message, spans, entry_parser)
+
     @classmethod
     def _withhold_marker_corrupted_fields(cls, structured_data, entry_parser, buf, start, end, message_type):
         """If any decoded (non-raw_hex) field's own source bytes overlap the
@@ -5568,7 +5666,20 @@ class Gen2:
                 entry = cls.unhandled_entry_format(message_type, message)
                 entry['event'] = 'Exception caught: ' + entry['event']
 
-            if entry_parser and entry.get('structured_data') is not None and not entry.get('text_restored'):
+            # A 0x4B/0x4C/0x4D record the decoder declined because the page
+            # marker damaged it: decode what survived and withhold what the
+            # marker covered. The withholding is exact here, so the filler
+            # probe below is not run on a repaired record.
+            repaired = None
+            if (entry_parser and entry.get('structured_data') is None
+                    and message_type in cls.MARKER_REPAIR_TYPES):
+                repaired = cls._repair_marker_damage(
+                    message_type, message, buf, start, start + length, entry_parser)
+                if repaired is not None:
+                    entry = repaired
+
+            if (entry_parser and repaired is None and entry.get('structured_data') is not None
+                    and not entry.get('text_restored')):
                 # (a line restored from the template table takes its structured numbers from the
                 # surviving digits of the restored text, not from marker-overwritten bytes, so the
                 # contamination probe does not apply to it)

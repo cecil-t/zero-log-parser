@@ -28,7 +28,7 @@ NOT_DECODERS = {'_marker_corrupted_entry', 'undecoded_hex_display', 'mark_bytes_
                 '_set_structured_field', 'gen3_debug_message', 'gen3_text_message',
                 'collect_paged_bms_entries', 'payload_layout', '_telemetry_layout',
                 '_charger_layout', 'telemetry_extended_fields', 'telemetry_pack_fields',
-                'bms_telemetry_status_fields'}
+                'bms_telemetry_status_fields', '_repair_marker_prefix'}
 
 
 def _decoder_lengths():
