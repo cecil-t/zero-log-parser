@@ -41,7 +41,8 @@ def _decoder_lengths():
         'charger_info': {0x48: charger},
         'gen3_firmware_build_info': {0x4e: Gen2.GEN3_FIRMWARE_BUILD_INFO_LENGTHS},
         'state_snapshot': {t: (v[1],) for t, v in Gen2.STATE_SNAPSHOT_TIERS.items()},
-        'bms_cell_telemetry': {t: v[1] for t, v in Gen2.BMS_CELL_TELEMETRY_TIERS.items()},
+        'bms_cell_telemetry': {t: v[1] + tuple(n for (st, n) in Gen2.BMS_CELL_TELEMETRY_SHORT if st == t)
+                               for t, v in Gen2.BMS_CELL_TELEMETRY_TIERS.items()},
         'vehicle_state_telemetry': {0x51: Gen2.VEHICLE_STATE_TELEMETRY_LENGTHS},
         'vehicle_state_telemetry_tier': {t: v[1] for t, v in Gen2.TELEMETRY_TIERS.items()},
     }
@@ -129,6 +130,9 @@ def _payload(message_type, length):
         buf[11], buf[30] = 0, 0
         for lo_hi in Gen2.BMS_CELL_TEMPERATURE_OFFSETS.get((message_type, length), ()):
             buf[lo_hi] = 20
+        if (message_type, length) in Gen2.BMS_CELL_TELEMETRY_SHORT:   # the short variants take plausible cells only
+            struct.pack_into('<HHH', buf, 14 + shift, 3800, 3790, 3850)
+            buf[20 + shift] = 55
     elif message_type == 0x4e:
         text = b'Jun  4 2019 17:39:46'
         buf[:] = bytearray(length)
@@ -148,7 +152,7 @@ def _payload(message_type, length):
 
 
 def _log_type(message_type, length):
-    bms = {(t, n) for t, v in Gen2.BMS_CELL_TELEMETRY_TIERS.items() for n in v[1]}
+    bms = {(t, n) for t, v in Gen2.BMS_CELL_TELEMETRY_TIERS.items() for n in v[1]} | set(Gen2.BMS_CELL_TELEMETRY_SHORT)
     return LogFile.log_type_bms if (message_type, length) in bms or message_type == 0x0f else LogFile.log_type_mbb
 
 

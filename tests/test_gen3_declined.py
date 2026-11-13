@@ -146,3 +146,35 @@ def test_record_one_byte_long_with_the_marker_on_the_cell_block_of_a_0x4d():
 def test_record_one_byte_long_without_a_marker_stays_declined():
     entry = _decode_one(_entry(0x4b, T, _cell_payload(length=44)))
     assert entry.get('structured_data') is None
+
+
+# --- Step 3: 0x4B at 39 bytes, the 43-byte record without the pack voltage ---
+
+def _short_payload(length, shift):
+    p = _cell_payload(length=length, shift=shift)
+    p[10 + shift] = 0x20                 # sleep indicator
+    p[26 + shift:30 + shift] = b'\xd8\xf3\x07\x06'
+    return p
+
+
+def test_0x4b_39_decodes_with_the_43_byte_fields_and_no_pack_voltage():
+    entry = Gen2.state_snapshot_dispatch(0x4b, _short_payload(39, 0))
+    sd = entry['structured_data']
+    assert entry['event'] == 'BMS Cell Telemetry'
+    _assert_cells(sd, pack=False)
+    assert 'pack_voltage_volts' not in sd             # not in the record: neither shown nor withheld
+    assert 'corrupted_fields' not in sd
+    assert sd['bms_report_mode'] == 7 and sd['bms_sleeping'] is True
+    assert sd['bms_status_word'] == 0x0607f3d8
+    assert 'Vpack' not in entry['conditions']
+    assert sd['subsecond_us'] == 432_000
+
+
+def test_misframed_or_implausible_39_byte_records_stay_declined():
+    framed = _short_payload(39, 0)
+    framed[31:39] = b'\xb2\x2fExit'[:8].ljust(8, b'i')    # another entry's header and a run of text
+    implausible = _short_payload(39, 0)
+    struct.pack_into('<H', implausible, 18, 9000)          # high cell 9 V
+    for payload in (framed, implausible):
+        entry = Gen2.state_snapshot_dispatch(0x4b, payload)
+        assert entry.get('structured_data') is None

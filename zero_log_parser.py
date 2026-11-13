@@ -3117,6 +3117,12 @@ class Gen2:
         0x4d: (8, (69, 71)),
     }
     BMS_CELL_TELEMETRY_FIELD_BASE = 14  # x-offset of the block's first byte for 0x4B
+    # Short variants written by BMS firmware 8, 9 and 11 (131,200-byte files):
+    # (message_type, length) -> how many leading bytes line up with the full
+    # record. Those bytes decode with the full record's fields; the record
+    # stops before the pack voltage, so there is none to show, and any bytes
+    # past the aligned head stay undecoded (analysis/gen3_declined.md).
+    BMS_CELL_TELEMETRY_SHORT = {(0x4b, 39): 39}
 
     # --- BMS-side fields beyond the cell-voltage block (analysis/bms_fields_and_text_events.md).
     # Offsets below are payload offsets of the 0x4B shape; 0x4C adds 4 and 0x4D
@@ -3255,7 +3261,8 @@ class Gen2:
         unhandled_entry_format() already gives these types.
         """
         shift, valid_lengths = cls.BMS_CELL_TELEMETRY_TIERS[message_type]
-        if len(x) not in valid_lengths:
+        short = (message_type, len(x)) in cls.BMS_CELL_TELEMETRY_SHORT
+        if len(x) not in valid_lengths and not short:
             return cls.unhandled_entry_format(message_type, x)
 
         prefix = cls.fst_entry_prefix(x)
@@ -3263,12 +3270,13 @@ class Gen2:
             return cls.unhandled_entry_format(message_type, x)
 
         base = cls.BMS_CELL_TELEMETRY_FIELD_BASE + shift
+        if short and not cls._short_cell_record_shape(x, base):
+            return cls.unhandled_entry_format(message_type, x)
         voltage_low = BinaryTools.unpack('uint16', x, base + 0)
         voltage_unloaded = BinaryTools.unpack('uint16', x, base + 2)
         voltage_high = BinaryTools.unpack('uint16', x, base + 4)
         soc = BinaryTools.unpack('uint8', x, base + 6)
         current_ma = BinaryTools.unpack('int32', x, base + 7)
-        pack_voltage_mv = int.from_bytes(bytes(x[base + 25:base + 28]), 'little')
 
         structured_data = dict(prefix)
         structured_data.update({
@@ -3277,8 +3285,9 @@ class Gen2:
             'voltage_high_cell_volts': voltage_high / 1000.0,
             'state_of_charge_percent': soc,
             'battery_current_amps': current_ma / 1000.0,
-            'pack_voltage_volts': pack_voltage_mv / 1000.0,
         })
+        if not short:
+            structured_data['pack_voltage_volts'] = int.from_bytes(bytes(x[base + 25:base + 28]), 'little') / 1000.0
 
         status, status_conditions = cls.bms_telemetry_status_fields(message_type, x)
         structured_data.update(status)
@@ -3286,8 +3295,8 @@ class Gen2:
 
         conditions = (
             f"SOC:{soc}%, Vlow:{voltage_low}mV, Vhigh:{voltage_high}mV, "
-            f"Vpack:{structured_data['pack_voltage_volts']:.3f}V, "
-            f"I:{structured_data['battery_current_amps']:.3f}A"
+            + (f"Vpack:{structured_data['pack_voltage_volts']:.3f}V, " if not short else '')
+            + f"I:{structured_data['battery_current_amps']:.3f}A"
         )
         if status_conditions:
             conditions += ', ' + status_conditions
@@ -3297,6 +3306,20 @@ class Gen2:
             'conditions': conditions,
             'structured_data': structured_data
         }
+
+    @classmethod
+    def _short_cell_record_shape(cls, x, base):
+        """A short-variant record is taken only when its cell block reads as
+        one: low and high cell 2.5-4.3 V with high >= low, the unloaded cell 0
+        or in that range, and a state of charge up to 100%. Records at these
+        lengths that fail this, or that hold another entry's 0xb2 header
+        together with a run of text, are misframed and stay undecoded."""
+        low, unloaded, high = (BinaryTools.unpack('uint16', x, base + i) for i in (0, 2, 4))
+        cells = (2500 <= low <= 4300 and 2500 <= high <= 4300 and high >= low
+                 and (unloaded == 0 or 2500 <= unloaded <= 4300))
+        if not cells or x[base + 6] > 100:
+            return False
+        return not (0xb2 in x[6:] and re.search(rb'[A-Za-z]{5}', bytes(x)))
 
     @classmethod
     def state_snapshot_dispatch(cls, message_type, x):
@@ -3497,6 +3520,26 @@ class Gen2:
             (0, 2, 'field', 'motor_temp_celsius'),
             (2, 4, 'field', 'controller_temp_celsius'),
             (4, 6, 'unknown', 'not understood yet'),
+        ),
+        (0x4b, 39): (
+            (0, 4, 'field', 'subsecond_us'),
+            (4, 5, 'field', 'sequence'),
+            (5, 6, 'field', 'marker'),
+            (6, 7, 'unknown', 'not understood yet (0x00 in 69% of entries, unlike the 43-byte record)'),
+            (7, 10, 'reserved', 'constant 0x00 in all 981 accepted entries'),
+            (10, 11, 'field', 'bms_sleep_indicator'),
+            (11, 12, 'field', 'pack_fault_flags_a'),
+            (12, 14, 'reserved', 'constant 0x00 in all 981 accepted entries'),
+            (14, 16, 'field', 'voltage_low_cell_volts'),
+            (16, 18, 'field', 'voltage_unloaded_cell_volts'),
+            (18, 20, 'field', 'voltage_high_cell_volts'),
+            (20, 21, 'field', 'state_of_charge_percent'),
+            (21, 25, 'field', 'battery_current_amps'),
+            (25, 26, 'field', 'bms_temperature_c'),
+            (26, 30, 'field', 'bms_status_word'),
+            (30, 31, 'field', 'pack_fault_flags_b'),
+            (31, 38, 'unknown', 'not understood yet (not constant in this variant)'),
+            (38, 39, 'field', 'bms_report_mode'),
         ),
         (0x4b, 43): (
             (0, 4, 'field', 'subsecond_us'),
