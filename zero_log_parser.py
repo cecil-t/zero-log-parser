@@ -3122,7 +3122,10 @@ class Gen2:
     # record. Those bytes decode with the full record's fields; the record
     # stops before the pack voltage, so there is none to show, and any bytes
     # past the aligned head stay undecoded (analysis/gen3_declined.md).
-    BMS_CELL_TELEMETRY_SHORT = {(0x4b, 39): 39}
+    # The 0x4C and 0x4D variants line up only through the report mode byte;
+    # their tails (from the full record's pack voltage on) cannot be placed
+    # and stay in raw_hex, including the bytes that may be cell temperatures.
+    BMS_CELL_TELEMETRY_SHORT = {(0x4b, 39): 39, (0x4c, 55): 43, (0x4d, 63): 47}
 
     # --- BMS-side fields beyond the cell-voltage block (analysis/bms_fields_and_text_events.md).
     # Offsets below are payload offsets of the 0x4B shape; 0x4C adds 4 and 0x4D
@@ -3604,6 +3607,24 @@ class Gen2:
             (40, 45, 'unknown', 'not understood yet'),
             (45, 46, 'reserved', 'constant 0x00 in all 5405 marker-free accepted entries'),
         ),
+        (0x4c, 55): (
+            (0, 4, 'field', 'subsecond_us'),
+            (4, 5, 'field', 'sequence'),
+            (5, 6, 'field', 'marker'),
+            (6, 14, 'unknown', 'not understood yet (only 5 entries seen, too few to call constant)'),
+            (14, 15, 'field', 'bms_sleep_indicator'),
+            (15, 18, 'unknown', 'not understood yet (only 5 entries seen, too few to call constant)'),
+            (18, 20, 'field', 'voltage_low_cell_volts'),
+            (20, 22, 'field', 'voltage_unloaded_cell_volts'),
+            (22, 24, 'field', 'voltage_high_cell_volts'),
+            (24, 25, 'field', 'state_of_charge_percent'),
+            (25, 29, 'field', 'battery_current_amps'),
+            (29, 30, 'field', 'bms_temperature_c'),
+            (30, 34, 'field', 'bms_status_word'),
+            (34, 42, 'unknown', 'not understood yet (only 5 entries seen, too few to call constant)'),
+            (42, 43, 'field', 'bms_report_mode'),
+            (43, 55, 'unknown', 'not understood yet: from here the record does not line up with the full-length record'),
+        ),
         (0x4c, 61): (
             (0, 4, 'field', 'subsecond_us'),
             (4, 5, 'field', 'sequence'),
@@ -3691,6 +3712,27 @@ class Gen2:
             (74, 75, 'unknown', 'not understood yet'),
             (75, 76, 'reserved', 'constant 0x01 in all 334 marker-free accepted entries'),
             (76, 77, 'unknown', 'not understood yet'),
+        ),
+        (0x4d, 63): (
+            (0, 4, 'field', 'subsecond_us'),
+            (4, 5, 'field', 'sequence'),
+            (5, 6, 'field', 'marker'),
+            (6, 15, 'reserved', 'constant 0x00 in all 286 accepted entries'),
+            (15, 16, 'unknown', 'not understood yet'),
+            (16, 18, 'reserved', 'constant 0x00 in all 286 accepted entries'),
+            (18, 19, 'field', 'bms_sleep_indicator'),
+            (19, 20, 'unknown', 'not understood yet'),
+            (20, 22, 'reserved', 'constant 0x00 in all 286 accepted entries'),
+            (22, 24, 'field', 'voltage_low_cell_volts'),
+            (24, 26, 'field', 'voltage_unloaded_cell_volts'),
+            (26, 28, 'field', 'voltage_high_cell_volts'),
+            (28, 29, 'field', 'state_of_charge_percent'),
+            (29, 33, 'field', 'battery_current_amps'),
+            (33, 34, 'field', 'bms_temperature_c'),
+            (34, 38, 'field', 'bms_status_word'),
+            (38, 46, 'unknown', 'not understood yet (not constant in this variant)'),
+            (46, 47, 'field', 'bms_report_mode'),
+            (47, 63, 'unknown', 'not understood yet: from here the record does not line up with the full-length record'),
         ),
         (0x4d, 69): (
             (0, 4, 'field', 'subsecond_us'),

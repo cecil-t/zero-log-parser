@@ -178,3 +178,23 @@ def test_misframed_or_implausible_39_byte_records_stay_declined():
     for payload in (framed, implausible):
         entry = Gen2.state_snapshot_dispatch(0x4b, payload)
         assert entry.get('structured_data') is None
+
+
+# --- Step 4: 0x4D at 63 and 0x4C at 55, the aligned head only ---
+
+def test_short_0x4d_and_0x4c_decode_the_head_and_leave_the_tail_raw():
+    for message_type, length, shift in ((0x4d, 63, 8), (0x4c, 55, 4)):
+        head = Gen2.BMS_CELL_TELEMETRY_SHORT[(message_type, length)]
+        payload = _short_payload(length, shift)
+        payload[head:] = bytes(range(0x11, 0x11 + length - head))     # an invented tail
+        entry = Gen2.state_snapshot_dispatch(message_type, payload)
+        sd = entry['structured_data']
+        assert entry['event'] == 'BMS Cell Telemetry', hex(message_type)
+        _assert_cells(sd, pack=False)
+        assert sd['bms_report_mode'] == 7
+        for name in ('pack_voltage_volts', 'cell_temperature_coldest_c', 'cell_temperature_hottest_c',
+                     'full_charge_capacity_ah', 'bms_charge_current_limit_amps'):
+            assert name not in sd, (hex(message_type), name)
+        assert sd['raw_hex'] == bytes(payload).hex()     # the tail is kept, undecoded
+        kinds = {i: k for a, b, k, _ in Gen2.payload_layout(message_type, length) for i in range(a, b)}
+        assert all(kinds[i] == Gen2.LAYOUT_UNKNOWN for i in range(head, length))

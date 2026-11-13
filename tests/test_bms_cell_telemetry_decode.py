@@ -131,7 +131,8 @@ def test_raw_hex_preserves_the_whole_payload():
 
 
 def test_wrong_length_falls_back_to_raw_hex():
-    cases = [(0x4b, 44), (0x4b, 46), (0x4b, 61), (0x4c, 60), (0x4c, 69), (0x4d, 63), (0x4d, 68)]
+    # (0x4d, 63) is a short variant now (BMS_CELL_TELEMETRY_SHORT); 62 is not
+    cases = [(0x4b, 44), (0x4b, 46), (0x4b, 61), (0x4c, 60), (0x4c, 69), (0x4d, 62), (0x4d, 68)]
     for message_type, length in cases:
         out = Gen2.bms_cell_telemetry(message_type, _payload(message_type, length=length))
         assert 'structured_data' not in out, (message_type, length)
