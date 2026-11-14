@@ -2883,7 +2883,7 @@ class Gen2:
     #  12-15  DC output voltage, u32 mV
     #  16-17  DC output current, u16: mA on MBB firmware rev 15 and earlier,
     #         A from rev 16 (CHARGER_CURRENT_MA_MAX_REV)
-    #  18-19  undecoded (the datasheet's maximum charge current)
+    #  18-19  maximum charge current, u16, mA or A as 16-17
     #  20-23  maximum charge voltage, u32 mV
     #  24     AC input current limit, u8 A
     #  25     charger variant code, u8
@@ -2902,15 +2902,15 @@ class Gen2:
     # Evidence for the original fields: analysis/fst_part1_decoders.md.
     CHARGER_RECORD_OFFSET = 6
     CHARGER_RECORD_LEN = 49
-    # The three charger currents count mA up to this MBB firmware revision and
+    # The four charger currents count mA up to this MBB firmware revision and
     # A after it (the datasheet says rev 7-15; in this file set every record
     # of rev 6-15 reads as mA and every record of rev 16 and later as A).
     CHARGER_CURRENT_MA_MAX_REV = 15
 
     @classmethod
     def charger_current(cls, record, offset, rev):
-        """One of the three firmware-dependent charger currents (u16 at
-        record offset 16, 27 or 44), in A; None when the revision the entry
+        """One of the four firmware-dependent charger currents (u16 at
+        record offset 16, 18, 27 or 44), in A; None when the revision the entry
         was written under is not known, because the unit is then unknown."""
         if not isinstance(rev, int):
             return None
@@ -2922,11 +2922,11 @@ class Gen2:
         """Type 0x48 - charger table (55 or 104 bytes: one or two 49-byte
         charger records after the shared 6-byte prefix).
 
-        The record fields are listed in the comment above. The three
+        The record fields are listed in the comment above. The four
         currents need the MBB firmware revision the entry was written under
         (firmware, a Gen3TelemetryFirmware, at timestamp); without it they
-        are None. The maximum charge current, the byte at record offset 30
-        and nothing else stay undecoded, in each record's raw_hex.
+        are None. Only the byte at record offset 30 stays undecoded, in each
+        record's raw_hex.
 
         A payload whose length is not the prefix plus a whole number of
         records, or whose name field is not NUL-padded printable ASCII,
@@ -2958,6 +2958,7 @@ class Gen2:
                 'flags': BinaryTools.unpack('uint16', record, 10),
                 'dc_output_voltage_volts': BinaryTools.unpack('uint32', record, 12) / 1000.0,
                 'dc_output_current_amps': cls.charger_current(record, 16, rev),
+                'max_charge_current_amps': cls.charger_current(record, 18, rev),
                 'max_charge_voltage_volts': BinaryTools.unpack('uint32', record, 20) / 1000.0,
                 'ac_input_current_limit_amps': BinaryTools.unpack('uint8', record, 24),
                 'charger_variant': BinaryTools.unpack('uint8', record, 25),
@@ -4042,7 +4043,7 @@ class Gen2:
         (10, 12, 'field', 'chargers.flags'),
         (12, 16, 'field', 'chargers.dc_output_voltage_volts'),
         (16, 18, 'field', 'chargers.dc_output_current_amps'),
-        (18, 20, 'unknown', 'not understood yet (the datasheet maximum charge current; the set-point current exceeds it in 46% of records)'),
+        (18, 20, 'field', 'chargers.max_charge_current_amps'),
         (20, 24, 'field', 'chargers.max_charge_voltage_volts'),
         (24, 25, 'field', 'chargers.ac_input_current_limit_amps'),
         (25, 26, 'field', 'chargers.charger_variant'),

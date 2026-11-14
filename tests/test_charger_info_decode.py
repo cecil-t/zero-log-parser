@@ -178,7 +178,7 @@ def _measured_record(raw_currents, **kw):
     dc, ac, setpoint = raw_currents
     struct.pack_into('<I', rec, 12, 109875)        # DC output 109.875 V
     struct.pack_into('<H', rec, 16, dc)
-    struct.pack_into('<H', rec, 18, 4321)          # undecoded (maximum charge current)
+    struct.pack_into('<H', rec, 18, 4321)          # maximum charge current (unit by revision)
     struct.pack_into('<I', rec, 20, 121000)        # maximum charge voltage 121 V
     rec[24] = 13                                   # AC input current limit, A
     rec[25] = 42                                   # variant code
@@ -199,6 +199,7 @@ def test_record_measurements_decode_in_amps_from_rev_16():
     c = out['structured_data']['chargers'][0]
     assert c['dc_output_voltage_volts'] == 109.875
     assert c['dc_output_current_amps'] == 23.0
+    assert c['max_charge_current_amps'] == 4321.0
     assert c['max_charge_voltage_volts'] == 121.0
     assert c['ac_input_current_limit_amps'] == 13
     assert c['charger_variant'] == 42
@@ -217,6 +218,7 @@ def test_record_currents_are_milliamps_up_to_rev_15():
     rec = _measured_record((23456, 9870, 65535))
     c = Gen2.charger_info(_payload(rec), firmware=Gen3TelemetryFirmware(15), timestamp=1)['structured_data']['chargers'][0]
     assert (c['dc_output_current_amps'], c['ac_current_amps'], c['setpoint_current_amps']) == (23.456, 9.87, 65.535)
+    assert c['max_charge_current_amps'] == 4.321
     # the set-point AC input current is whole amps on every revision
     assert c['setpoint_ac_input_current_amps'] == 14
 
@@ -227,6 +229,7 @@ def test_record_currents_are_withheld_without_a_known_revision():
         out = Gen2.charger_info(_payload(rec), firmware=firmware, timestamp=1)
         c = out['structured_data']['chargers'][0]
         assert c['dc_output_current_amps'] is None and c['ac_current_amps'] is None and c['setpoint_current_amps'] is None
+        assert c['max_charge_current_amps'] is None
         assert c['dc_output_voltage_volts'] == 109.875           # the rest does not depend on the revision
         assert 'out 109.875V n/aA' in out['conditions']
 
