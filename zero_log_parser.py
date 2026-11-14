@@ -3649,6 +3649,14 @@ class Gen2:
         (0x53, 95): {-29: 'snapshot_flags', -33: 'snapshot_error_flags'},
         (0x53, 99): {-29: 'snapshot_flags'},
     }
+    # 0x52 at 81 bytes, tag+41 (payload 80), the datasheet's
+    # bms_lowest_dis_allow position: on MBB firmware rev 15 and earlier it
+    # repeats the coldest pack temperature (s8 C; equal to
+    # pack_temperature_coldest_c in 40 of 40 entries, 5 files, rev 13-15);
+    # from rev 16 it is 0 in every entry (3,280; 5 more are 0xff erase fill),
+    # so it is None there and without a revision (analysis/gen3_mbb_d3c.md).
+    TELEMETRY_COLDEST_REPEAT = {(0x52, 81): 41}
+    TELEMETRY_COLDEST_REPEAT_MAX_REV = 15
     # Validity flag byte: two bit groups, set when the group's fields read as
     # zero because the source is not reporting. Confirmed on all 82,840
     # entries of the FST file set: the controller group (mask 0x1E) is set
@@ -4189,6 +4197,8 @@ class Gen2:
             paint(tag + offset, width, name)
         for rel, name in cls.TELEMETRY_TIER_FLAG_FIELDS.get((message_type, length), {}).items():
             paint(tag + rel, 1, name)
+        if (message_type, length) in cls.TELEMETRY_COLDEST_REPEAT:
+            paint(tag + cls.TELEMETRY_COLDEST_REPEAT[(message_type, length)], 1, 'pack_temperature_coldest_repeat_c')
         for offset, evidence in cls.TELEMETRY_RESERVED_BYTES.get((message_type, length), {}).items():
             if kinds[offset] == cls.LAYOUT_UNKNOWN:
                 kinds[offset] = cls.LAYOUT_RESERVED
@@ -4461,6 +4471,12 @@ class Gen2:
                                     f"/{structured_data['contactors_closed']}")
         if 'controller_fault_code' in structured_data:
             extended_conditions += f", controller code:{structured_data['controller_fault_code']}"
+        if (message_type, len(x)) in cls.TELEMETRY_COLDEST_REPEAT:
+            entry_rev = firmware.rev_at(timestamp) if firmware is not None and timestamp is not None else None
+            repeat = None
+            if isinstance(entry_rev, int) and entry_rev <= cls.TELEMETRY_COLDEST_REPEAT_MAX_REV:
+                repeat = BinaryTools.unpack('int8', x, tag_offset + cls.TELEMETRY_COLDEST_REPEAT[(message_type, len(x))])
+            structured_data['pack_temperature_coldest_repeat_c'] = repeat
         structured_data['raw_hex'] = bytes(x).hex()
 
         return {
@@ -6189,8 +6205,9 @@ class Gen3TelemetryFirmware:
     revisions (the ambient scale and the flag bit maps, see
     Gen2.telemetry_ambient and Gen2.telemetry_flag_map_is_shifted). The
     0x48 charger currents use it too (mA up to rev 15, A after, see
-    Gen2.charger_current), and so does the 0x48 charger temperature (see
-    Gen2.charger_temperature).
+    Gen2.charger_current), and so do the 0x48 charger temperature (see
+    Gen2.charger_temperature) and the 0x52/81 coldest temperature repeat
+    (Gen2.TELEMETRY_COLDEST_REPEAT).
 
     The header revision is the one at download time. The file's 0x4E
     firmware-updated entries (payload 6 u16 previous revision, payload 8 u16

@@ -20,7 +20,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from zero_log_parser import Gen2
+from zero_log_parser import Gen2, Gen3TelemetryFirmware
 
 TIERS = {
     0x52: ('medium', (81, 85), 39),
@@ -246,3 +246,44 @@ def test_new_fields_leave_the_existing_tail_alone():
         after = Gen2.vehicle_state_telemetry_tier(message_type, _with_new_fields(message_type, length))['structured_data']
         for key in ('distance_km', 'speed_kmh', 'range_km', 'state_of_charge_percent', 'pack_voltage_volts'):
             assert before.get(key) == after.get(key), (hex(message_type), length, key)
+
+
+# ---- 0x52/81 payload byte 80: the coldest pack temperature repeated on MBB firmware
+# rev 15 and earlier, 0 from rev 16 (analysis/gen3_mbb_d3c.md). Invented values. ----
+
+def _repeat(raw, rev, updates=()):
+    buf = _payload(0x52, 81)
+    buf[80] = raw
+    fw = Gen3TelemetryFirmware(rev, updates)
+    return Gen2.vehicle_state_telemetry_tier(0x52, buf, firmware=fw, timestamp=1_600_000_000)['structured_data']
+
+
+def test_coldest_repeat_decodes_as_signed_c_up_to_rev_15():
+    for rev in (13, 14, 15):
+        assert _repeat(23, rev)['pack_temperature_coldest_repeat_c'] == 23
+        assert _repeat(0xfb, rev)['pack_temperature_coldest_repeat_c'] == -5
+
+
+def test_coldest_repeat_is_none_from_rev_16_and_without_a_revision():
+    for rev in (16, 19, 30):
+        assert _repeat(0, rev)['pack_temperature_coldest_repeat_c'] is None
+        assert _repeat(23, rev)['pack_temperature_coldest_repeat_c'] is None
+    sd = Gen2.vehicle_state_telemetry_tier(0x52, _payload(0x52, 81))['structured_data']
+    assert sd['pack_temperature_coldest_repeat_c'] is None
+
+
+def test_coldest_repeat_follows_the_entry_revision_across_an_update():
+    # Header rev 17; an update 15 -> 17 after the entry means it was written under 15.
+    assert _repeat(23, 17, updates=[(1_700_000_000, 15, 17)])['pack_temperature_coldest_repeat_c'] == 23
+    assert _repeat(23, 17, updates=[(1_500_000_000, 15, 17)])['pack_temperature_coldest_repeat_c'] is None
+
+
+def test_coldest_repeat_only_on_0x52_at_81_bytes():
+    for message_type, length in ((0x52, 85), (0x53, 95), (0x53, 99), (0x53, 93)):
+        fw = Gen3TelemetryFirmware(14)
+        sd = Gen2.vehicle_state_telemetry_tier(message_type, _payload(message_type, length),
+                                               firmware=fw, timestamp=1_600_000_000)['structured_data']
+        assert 'pack_temperature_coldest_repeat_c' not in sd, (message_type, length)
+    layout = Gen2.payload_layout(0x52, 81)
+    assert (80, 81, 'field', 'pack_temperature_coldest_repeat_c') in layout
+    assert not any(kind == 'unknown' for _s, _e, kind, _l in layout)

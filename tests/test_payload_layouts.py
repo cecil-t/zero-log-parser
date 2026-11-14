@@ -179,6 +179,11 @@ def _output(message_type, length, payload):
         # the charger currents need the firmware revision the entry was written under
         result = Gen2.charger_info(bytearray(payload), firmware=Gen3TelemetryFirmware(30), timestamp=0)
         return (result.get('event'), result.get('conditions'), _flatten(result.get('structured_data') or {}))
+    if (message_type, length) in Gen2.TELEMETRY_COLDEST_REPEAT:
+        # payload byte 80 is decoded only on MBB firmware rev 15 and earlier
+        result = Gen2.vehicle_state_telemetry_tier(message_type, bytearray(payload),
+                                                   firmware=Gen3TelemetryFirmware(14), timestamp=0)
+        return (result.get('event'), result.get('conditions'), _flatten(result.get('structured_data') or {}))
     parser = Gen2._entry_parsers(_log_type(message_type, length), gen3_text=True)[message_type]
     result = parser(bytearray(payload))
     return (result.get('event'), result.get('conditions'), _flatten(result.get('structured_data') or {}))
