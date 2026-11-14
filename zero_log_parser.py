@@ -2890,7 +2890,8 @@ class Gen2:
     #  26     AC input voltage, u8 V
     #  27-28  AC input current, u16, mA or A as 16-17
     #  29     hertz
-    #  30     undecoded (the datasheet's charger temperature; does not fit it)
+    #  30     charger temperature, C, encoded by MBB firmware revision
+    #         (CHARGER_TEMPERATURE_*; analysis/gen3_mbb_d3b.md)
     #  31     id (0x10, 0x11, 0x12)
     #  32-33  version, u16 LE
     #  34-37  serial number, u32 LE
@@ -2906,6 +2907,47 @@ class Gen2:
     # A after it (the datasheet says rev 7-15; in this file set every record
     # of rev 6-15 reads as mA and every record of rev 16 and later as A).
     CHARGER_CURRENT_MA_MAX_REV = 15
+    # Record byte 30, the charger temperature (John Myers' (atomicdog)
+    # datasheet: charger temperature, s8 C). Its encoding follows the MBB
+    # firmware revision the entry was written under, not the charger:
+    #   rev 15 and earlier  u8, C + 50
+    #   rev 16-19, 39+      s8, C
+    #   rev 20-38           s8, C - 50
+    # In each band the value a disabled charger logs (raw 75, 25 and -25
+    # respectively) decodes to the same 25 C, and the decoded readings agree
+    # across the bands: within 11 minutes of a charge after 3 h or more of
+    # rest the charger reads 6 to 8 C above ambient below 1.5 kW and 18 to
+    # 20 C above it from 2.5 kW, and an unplugged charger cools to ambient.
+    # Revisions not seen in the file set are given their band by range.
+    CHARGER_TEMPERATURE_U8_MAX_REV = 15
+    CHARGER_TEMPERATURE_U8_OFFSET_C = 50
+    CHARGER_TEMPERATURE_SHIFTED_REVS = (20, 38)
+    CHARGER_TEMPERATURE_SHIFT_C = 50
+    # A disabled charger logs this value in place of a reading (2,015 of the
+    # 2,020 disabled, zero-output records that hold 25 or -25 in the file
+    # set hold the one their revision's encoding turns into 25 C). It
+    # is withheld in a disabled record; in an enabled one it is kept, since
+    # 25 C is also a real reading there.
+    CHARGER_TEMPERATURE_DEFAULT_C = 25
+
+    @classmethod
+    def charger_temperature(cls, record, rev):
+        """The charger temperature (record byte 30) in C, by the MBB
+        firmware revision the entry was written under; None when that
+        revision is not known, and None for the 25 C default a disabled
+        charger logs."""
+        if not isinstance(rev, int):
+            return None
+        if rev <= cls.CHARGER_TEMPERATURE_U8_MAX_REV:
+            value = BinaryTools.unpack('uint8', record, 30) - cls.CHARGER_TEMPERATURE_U8_OFFSET_C
+        else:
+            value = BinaryTools.unpack('int8', record, 30)
+            low, high = cls.CHARGER_TEMPERATURE_SHIFTED_REVS
+            if low <= rev <= high:
+                value += cls.CHARGER_TEMPERATURE_SHIFT_C
+        if value == cls.CHARGER_TEMPERATURE_DEFAULT_C and not BinaryTools.unpack('uint8', record, 48):
+            return None
+        return value
 
     @classmethod
     def charger_current(cls, record, offset, rev):
@@ -2925,8 +2967,9 @@ class Gen2:
         The record fields are listed in the comment above. The four
         currents need the MBB firmware revision the entry was written under
         (firmware, a Gen3TelemetryFirmware, at timestamp); without it they
-        are None. Only the byte at record offset 30 stays undecoded, in each
-        record's raw_hex.
+        are None, and so is the charger temperature, whose encoding also
+        depends on the revision (charger_temperature). Every record byte is
+        now decoded; each record's raw_hex is kept.
 
         A payload whose length is not the prefix plus a whole number of
         records, or whose name field is not NUL-padded printable ASCII,
@@ -2965,6 +3008,7 @@ class Gen2:
                 'ac_voltage_volts': BinaryTools.unpack('uint8', record, 26),
                 'ac_current_amps': cls.charger_current(record, 27, rev),
                 'hertz': BinaryTools.unpack('uint8', record, 29),
+                'charger_temperature_c': cls.charger_temperature(record, rev),
                 'id': BinaryTools.unpack('uint8', record, 31),
                 'version': BinaryTools.unpack('uint16', record, 32),
                 'serial_number': BinaryTools.unpack('uint32', record, 34),
@@ -2983,11 +3027,15 @@ class Gen2:
         def amps(value):
             return 'n/a' if value is None else f'{value:g}'
 
+        def temperature(value):
+            return '' if value is None else f'temp {value}C, '
+
         conditions = '; '.join(
             f"{c['name']} id {c['id']}, serial {c['serial_number']}, "
             f"version {c['version']}, {c['hertz']} Hz, "
             f"out {c['dc_output_voltage_volts']:.3f}V {amps(c['dc_output_current_amps'])}A, "
             f"AC {c['ac_voltage_volts']}V {amps(c['ac_current_amps'])}A, "
+            f"{temperature(c['charger_temperature_c'])}"
             f"{'enabled' if c['enabled'] else 'disabled'}"
             for c in chargers
         )
@@ -4050,7 +4098,7 @@ class Gen2:
         (26, 27, 'field', 'chargers.ac_voltage_volts'),
         (27, 29, 'field', 'chargers.ac_current_amps'),
         (29, 30, 'field', 'chargers.hertz'),
-        (30, 31, 'unknown', 'not understood yet (the datasheet charger temperature; it does not follow ambient)'),
+        (30, 31, 'field', 'chargers.charger_temperature_c'),
         (31, 32, 'field', 'chargers.id'),
         (32, 34, 'field', 'chargers.version'),
         (34, 38, 'field', 'chargers.serial_number'),
@@ -6120,7 +6168,8 @@ class Gen3TelemetryFirmware:
     revisions (the ambient scale and the flag bit maps, see
     Gen2.telemetry_ambient and Gen2.telemetry_flag_map_is_shifted). The
     0x48 charger currents use it too (mA up to rev 15, A after, see
-    Gen2.charger_current).
+    Gen2.charger_current), and so does the 0x48 charger temperature (see
+    Gen2.charger_temperature).
 
     The header revision is the one at download time. The file's 0x4E
     firmware-updated entries (payload 6 u16 previous revision, payload 8 u16

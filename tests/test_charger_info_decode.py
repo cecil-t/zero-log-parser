@@ -11,8 +11,9 @@ Filler bytes in the undecoded regions are 1..100, which avoids 0xB2 and
 wrapped in a raw entry for the parse_entry() test.
 
 Field offsets inside each 49-byte record: name 0-9, flags 10-11, measurement
-block 12-28 (undecoded), hertz 29, one unidentified byte 30, id 31, version
-32-33 (u16), serial number 34-37 (u32), trailer 38-48 (undecoded).
+block 12-28, hertz 29, charger temperature 30, id 31, version 32-33 (u16),
+serial number 34-37 (u32), set-point block 38-48 (see the comment above
+Gen2.charger_info for the full record layout).
 """
 
 import logging
@@ -184,7 +185,7 @@ def _measured_record(raw_currents, **kw):
     rec[25] = 42                                   # variant code
     rec[26] = 229                                  # AC input 229 V
     struct.pack_into('<H', rec, 27, ac)
-    rec[30] = 77                                   # undecoded
+    rec[30] = 77                                   # charger temperature (encoding by revision)
     struct.pack_into('<H', rec, 38, 31)            # charger type code
     struct.pack_into('<I', rec, 40, 114250)        # set-point voltage 114.25 V
     struct.pack_into('<H', rec, 44, setpoint)
@@ -287,3 +288,79 @@ def test_redecode_leaves_marker_damaged_charger_entries_alone():
     Gen3TelemetryFirmware.redecode(collected, 30)
     sd = collected[0][1]['structured_data']
     assert sd['chargers'][0]['dc_output_current_amps'] is None and sd['corrupted_fields'] == ['chargers.0.serial_number']
+
+
+def _temperature(raw, rev, enabled=1):
+    rec = _measured_record((10, 5, 20))
+    rec[30] = raw
+    rec[48] = enabled
+    return Gen2.charger_info(_payload(rec), firmware=Gen3TelemetryFirmware(rev), timestamp=1)
+
+
+def test_charger_temperature_is_u8_plus_50_up_to_rev_15():
+    assert _temperature(77, 15)['structured_data']['chargers'][0]['charger_temperature_c'] == 27
+    assert _temperature(98, 6)['structured_data']['chargers'][0]['charger_temperature_c'] == 48
+    # unsigned: a raw value of 0x90 is 94 C, not a negative reading
+    assert _temperature(0x90, 11)['structured_data']['chargers'][0]['charger_temperature_c'] == 94
+
+
+def test_charger_temperature_is_signed_c_on_rev_16_to_19_and_39_on():
+    for rev in (16, 19, 39, 44, 60):
+        assert _temperature(33, rev)['structured_data']['chargers'][0]['charger_temperature_c'] == 33
+        assert _temperature(0xf6, rev)['structured_data']['chargers'][0]['charger_temperature_c'] == -10
+
+
+def test_charger_temperature_is_signed_c_minus_50_on_rev_20_to_38():
+    for rev in (20, 29, 38):
+        assert _temperature(0xf1, rev)['structured_data']['chargers'][0]['charger_temperature_c'] == 35
+        assert _temperature(12, rev)['structured_data']['chargers'][0]['charger_temperature_c'] == 62
+
+
+def test_charger_temperature_is_withheld_without_a_known_revision():
+    rec = _measured_record((10, 5, 20))
+    rec[30] = 40
+    for firmware in (None, Gen3TelemetryFirmware(None)):
+        out = Gen2.charger_info(_payload(rec), firmware=firmware, timestamp=1)
+        assert out['structured_data']['chargers'][0]['charger_temperature_c'] is None
+        assert 'temp' not in out['conditions']
+
+
+def test_the_25_c_default_is_withheld_only_in_a_disabled_record():
+    # the default each band's encoding gives 25 C: raw 75 (rev <= 15), 25 (rev 16-19, 39+), 0xe7 = -25 (rev 20-38)
+    for raw, rev in ((75, 13), (25, 18), (0xe7, 33), (25, 42)):
+        assert _temperature(raw, rev, enabled=0)['structured_data']['chargers'][0]['charger_temperature_c'] is None
+        assert _temperature(raw, rev, enabled=1)['structured_data']['chargers'][0]['charger_temperature_c'] == 25
+    # any other reading in a disabled record is kept
+    assert _temperature(0xdb, 30, enabled=0)['structured_data']['chargers'][0]['charger_temperature_c'] == 13
+
+
+def test_charger_temperature_is_named_in_conditions():
+    out = _temperature(0xf1, 30)
+    assert 'AC 229V 5A, temp 35C, enabled' in out['conditions']
+    out = _temperature(0xe7, 30, enabled=0)
+    assert 'temp' not in out['conditions'] and out['conditions'].endswith('disabled')
+
+
+def test_second_record_reads_its_own_temperature():
+    first = _measured_record((10, 5, 20))
+    second = _measured_record((11, 6, 21), charger_id=0x11, fill=9)
+    first[30], second[30] = 91, 88
+    sd = Gen2.charger_info(_payload(first, second), firmware=Gen3TelemetryFirmware(9), timestamp=1)['structured_data']
+    assert [c['charger_temperature_c'] for c in sd['chargers']] == [41, 38]
+
+
+def test_redecode_reads_the_temperature_under_the_revision_before_an_update():
+    # a 0x4E update rev 38 -> 39 after the charger entry: the entry was written under rev 38, so -10 raw is 40 C
+    update = bytearray(60)
+    struct.pack_into('<HH', update, 6, 38, 39)
+    update_entry = {'message_type': '0x4E', 'event': 'Firmware Build Info', 'original_timestamp': 1_700_000_500,
+                    'structured_data': {'raw_hex': bytes(update).hex()}}
+    rec = _measured_record((10, 5, 20))
+    rec[30] = 0xf6
+    collected = [_collected(_payload(rec), 1_700_000_000), (1_700_000_500, update_entry, 2)]
+    assert collected[0][1]['structured_data']['chargers'][0]['charger_temperature_c'] is None
+    Gen3TelemetryFirmware.redecode(collected, 39)
+    assert collected[0][1]['structured_data']['chargers'][0]['charger_temperature_c'] == 40
+    later = [_collected(_payload(rec), 1_700_001_000), (1_700_000_500, update_entry, 2)]
+    Gen3TelemetryFirmware.redecode(later, 39)
+    assert later[0][1]['structured_data']['chargers'][0]['charger_temperature_c'] == -10
