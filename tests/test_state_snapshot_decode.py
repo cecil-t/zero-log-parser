@@ -160,15 +160,16 @@ def test_implausible_subsecond_value_falls_back_to_raw_hex():
 # analysis/gen3_mbb_partials.md section 4). All values are invented. ----
 
 FIELDS = {
-    0x4b: {'dcv': 14, 'rpm': 22, 'soc': 26, 'pv': 27, 'pi': 31, 'speed': 40},
-    0x4c: {'dcv': 18, 'rpm': 26, 'soc': 30, 'pv': 31, 'pi': 35, 'speed': 44,
+    0x4b: {'dcv': 14, 'rpm': 22, 'soc': 26, 'pv': 27, 'pi': 31, 'speed': 40, 'range': 44},
+    0x4c: {'dcv': 18, 'rpm': 26, 'soc': 30, 'pv': 31, 'pi': 35, 'speed': 44, 'range': 48,
            'amb': 54, 't1': 58, 't2': 62, 'bh': 66, 'bl': 70, 'mods': 74},
-    0x4d: {'dcv': 22, 'rpm': 30, 'soc': 34, 'pv': 35, 'pi': 39, 'speed': 48,
+    0x4d: {'dcv': 22, 'rpm': 30, 'soc': 34, 'pv': 35, 'pi': 39, 'speed': 48, 'range': 52,
            'amb': 58, 't1': 62, 't2': 66, 'bh': 70, 'bl': 74},
 }
 
 
-def _measured(message_type, dcv=104300, pv=104512, pi=-23456, speed=48 * 56250, temps=(17, 41, 33, 22, 19)):
+def _measured(message_type, dcv=104300, pv=104512, pi=-23456, speed=48 * 56250, temps=(17, 41, 33, 22, 19),
+              range_km=97):
     buf = _payload(message_type, _tag('RUN'))
     o = FIELDS[message_type]
     struct.pack_into('<i', buf, o['dcv'], dcv)
@@ -177,6 +178,7 @@ def _measured(message_type, dcv=104300, pv=104512, pi=-23456, speed=48 * 56250, 
     struct.pack_into('<I', buf, o['pv'], pv)
     struct.pack_into('<i', buf, o['pi'], pi)
     struct.pack_into('<i', buf, o['speed'], speed)
+    struct.pack_into('<H', buf, o['range'], range_km)
     if 'amb' in o:
         for key, value in zip(('amb', 't1', 't2', 'bh', 'bl'), temps):
             struct.pack_into('<i', buf, o[key], value)
@@ -243,4 +245,26 @@ def test_negative_temperatures_decode():
 
 def test_conditions_carry_state_tier_and_pack_summary():
     out = Gen2.state_snapshot(0x4b, _measured(0x4b))
-    assert out['conditions'] == 'State: RUN, tier: small, SOC:63%, Vpack:104.512V, I:-23.456A, speed:2.7km/h'
+    assert out['conditions'] == 'State: RUN, tier: small, SOC:63%, Vpack:104.512V, I:-23.456A, speed:2.7km/h, range:97km'
+
+
+def test_every_tier_decodes_the_range_in_plain_km():
+    # Plain km on this firmware, not the km x 100 of 0x52/0x53
+    # (analysis/gen3_mbb_d3c.md). Invented values.
+    for message_type in TIERS:
+        for value in (97, 3, 227, 300):
+            sd = Gen2.state_snapshot(message_type, _measured(message_type, range_km=value))['structured_data']
+            assert sd['range_km'] == value, (message_type, value)
+
+
+def test_a_zero_range_is_not_reported():
+    for message_type in TIERS:
+        out = Gen2.state_snapshot(message_type, _measured(message_type, range_km=0))
+        assert out['structured_data']['range_km'] is None
+        assert out['conditions'].endswith('range:n/akm')
+
+
+def test_range_bytes_are_a_layout_field():
+    for message_type, start in ((0x4b, 44), (0x4c, 48), (0x4d, 52)):
+        layout = Gen2.payload_layout(message_type, TIERS[message_type][1])
+        assert (start, start + 2, 'field', 'range_km') in layout, message_type

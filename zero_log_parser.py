@@ -3196,6 +3196,13 @@ class Gen2:
     #   t1/t2  s32 LE C - motor / inverter temperature
     #   bh/bl  s32 LE C - pack warmest / coldest temperature
     #   mods   u8 - BMS modules on CAN
+    #   range  u16 LE km - estimated range, plain km on this firmware (not
+    #       the km x 100 of 0x52/0x53); None when it reads 0, which happens
+    #       only when the BMS is not reporting or just after wake, never in
+    #       RUN. Km per percent of SOC matches the same bike's later 0x52/0x53
+    #       range in 4 of 5 bikes, falls as Wh/km rises (in 17 of 18 files),
+    #       and times Wh/km gives a usable pack of about 11.7 kWh (median);
+    #       miles would imply about 19 kWh (analysis/gen3_mbb_d3c.md).
     # The controller fields (dcv, rpm, t1, t2) are None when the DC bus
     # voltage reads 0: then the controller is not reporting (the record's
     # status bit 1 is set exactly then, and the motor and inverter
@@ -3204,10 +3211,10 @@ class Gen2:
     # in entries whose first byte flags failed reads.
     # message_type -> {field: payload offset}
     STATE_SNAPSHOT_FIELDS = {
-        0x4b: {'dcv': 14, 'rpm': 22, 'soc': 26, 'pv': 27, 'pi': 31, 'speed': 40},
-        0x4c: {'dcv': 18, 'rpm': 26, 'soc': 30, 'pv': 31, 'pi': 35, 'speed': 44,
+        0x4b: {'dcv': 14, 'rpm': 22, 'soc': 26, 'pv': 27, 'pi': 31, 'speed': 40, 'range': 44},
+        0x4c: {'dcv': 18, 'rpm': 26, 'soc': 30, 'pv': 31, 'pi': 35, 'speed': 44, 'range': 48,
                'amb': 54, 't1': 58, 't2': 62, 'bh': 66, 'bl': 70, 'mods': 74},
-        0x4d: {'dcv': 22, 'rpm': 30, 'soc': 34, 'pv': 35, 'pi': 39, 'speed': 48,
+        0x4d: {'dcv': 22, 'rpm': 30, 'soc': 34, 'pv': 35, 'pi': 39, 'speed': 48, 'range': 52,
                'amb': 58, 't1': 62, 't2': 66, 'bh': 70, 'bl': 74},
     }
     STATE_SNAPSHOT_TEMPERATURES = (
@@ -3225,6 +3232,7 @@ class Gen2:
         controller = dcv != 0
         pv = BinaryTools.unpack('uint32', x, o['pv'])
         speed = BinaryTools.unpack('int32', x, o['speed'])
+        range_km = BinaryTools.unpack('uint16', x, o['range'])
         out = {
             'state_of_charge_percent': BinaryTools.unpack('uint8', x, o['soc']),
             'pack_voltage_volts': pv / 1000.0 if pv else None,
@@ -3232,6 +3240,7 @@ class Gen2:
             'dc_bus_voltage_volts': dcv / 1000.0 if controller else None,
             'motor_rpm': BinaryTools.unpack('int32', x, o['rpm']) if controller else None,
             'speed_kmh': speed / cls.TELEMETRY_SPEED_MM_PER_KM if speed >= 0 else None,
+            'range_km': range_km or None,
         }
         for key, name in cls.STATE_SNAPSHOT_TEMPERATURES:
             if key in o:
@@ -3247,7 +3256,8 @@ class Gen2:
         conditions = (f"SOC:{out['state_of_charge_percent']}%, "
                       f"Vpack:{text(out['pack_voltage_volts'], '.3f')}V, "
                       f"I:{text(out['battery_current_amps'], '.3f')}A, "
-                      f"speed:{text(out['speed_kmh'], '.1f')}km/h")
+                      f"speed:{text(out['speed_kmh'], '.1f')}km/h, "
+                      f"range:{text(out['range_km'], 'd')}km")
         return out, conditions
 
     @classmethod
@@ -3834,8 +3844,7 @@ class Gen2:
             (35, 39, 'field', 'state'),
             (39, 40, 'reserved', 'constant 0x00 in all 5405 marker-free accepted entries'),
             (40, 44, 'field', 'speed_kmh'),
-            (44, 45, 'unknown', 'not understood yet'),
-            (45, 46, 'reserved', 'constant 0x00 in all 5405 marker-free accepted entries'),
+            (44, 46, 'field', 'range_km'),
         ),
         (0x4c, 55): (
             (0, 4, 'field', 'subsecond_us'),
@@ -3927,8 +3936,7 @@ class Gen2:
             (39, 43, 'field', 'state'),
             (43, 44, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
             (44, 48, 'field', 'speed_kmh'),
-            (48, 49, 'unknown', 'not understood yet'),
-            (49, 50, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
+            (48, 50, 'field', 'range_km'),
             (50, 54, 'unknown', 'not understood yet'),
             (54, 58, 'field', 'ambient_temperature_c'),
             (58, 62, 'field', 'motor_temp_c'),
@@ -4042,8 +4050,7 @@ class Gen2:
             (43, 47, 'field', 'state'),
             (47, 48, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
             (48, 52, 'field', 'speed_kmh'),
-            (52, 53, 'unknown', 'not understood yet'),
-            (53, 54, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
+            (52, 54, 'field', 'range_km'),
             (54, 58, 'unknown', 'not understood yet'),
             (58, 62, 'field', 'ambient_temperature_c'),
             (62, 66, 'field', 'motor_temp_c'),
