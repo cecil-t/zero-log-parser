@@ -80,9 +80,13 @@ def test_prefix_fields_are_read_from_the_first_six_bytes():
 def test_leading_field_is_not_labelled_odometer():
     # The leading u32 matches odometer_m's scale but is a sub-second
     # timestamp fraction (analysis/fst_part1_decoders.md); it must not be
-    # exposed under an odometer name.
+    # exposed under an odometer name. The only odometer field is the low
+    # byte of 0x4C/0x4D, read from its own offset.
     sd = Gen2.state_snapshot(0x4b, _payload(0x4b))['structured_data']
     assert not any('odo' in key for key in sd)
+    for message_type in (0x4c, 0x4d):
+        sd = Gen2.state_snapshot(message_type, _payload(message_type))['structured_data']
+        assert [key for key in sd if 'odo' in key] == ['odometer_low_byte']
 
 
 def test_raw_hex_preserves_the_whole_payload():
@@ -268,3 +272,15 @@ def test_range_bytes_are_a_layout_field():
     for message_type, start in ((0x4b, 44), (0x4c, 48), (0x4d, 52)):
         layout = Gen2.payload_layout(message_type, TIERS[message_type][1])
         assert (start, start + 2, 'field', 'range_km') in layout, message_type
+
+
+def test_medium_and_large_tiers_decode_the_odometer_low_byte():
+    # 0.1 km counts, wrapping at 25.6 km (analysis/gen3_mbb_d3c.md). Invented values.
+    for message_type, offset in ((0x4c, 76), (0x4d, 80)):
+        for value in (0, 137, 255):
+            buf = _measured(message_type)
+            buf[offset] = value
+            sd = Gen2.state_snapshot(message_type, buf)['structured_data']
+            assert sd['odometer_low_byte'] == value, (message_type, value)
+        layout = Gen2.payload_layout(message_type, TIERS[message_type][1])
+        assert (offset, offset + 1, 'field', 'odometer_low_byte') in layout

@@ -3203,6 +3203,11 @@ class Gen2:
     #       range in 4 of 5 bikes, falls as Wh/km rises (in 17 of 18 files),
     #       and times Wh/km gives a usable pack of about 11.7 kWh (median);
     #       miles would imply about 19 kWh (analysis/gen3_mbb_d3c.md).
+    #   odo    u8, 0x4C/0x4D only - odometer low byte, counting 0.1 km and
+    #       wrapping at 25.6 km; kept as the count read. Between two entries
+    #       of one ride its change matches the distance integrated from speed
+    #       (median ratio 0.99 to 1.00 over 2 to 25 km, 2,197 pairs) and it
+    #       is unchanged in 1,037 of 1,039 pairs with no movement.
     # The controller fields (dcv, rpm, t1, t2) are None when the DC bus
     # voltage reads 0: then the controller is not reporting (the record's
     # status bit 1 is set exactly then, and the motor and inverter
@@ -3213,9 +3218,9 @@ class Gen2:
     STATE_SNAPSHOT_FIELDS = {
         0x4b: {'dcv': 14, 'rpm': 22, 'soc': 26, 'pv': 27, 'pi': 31, 'speed': 40, 'range': 44},
         0x4c: {'dcv': 18, 'rpm': 26, 'soc': 30, 'pv': 31, 'pi': 35, 'speed': 44, 'range': 48,
-               'amb': 54, 't1': 58, 't2': 62, 'bh': 66, 'bl': 70, 'mods': 74},
+               'amb': 54, 't1': 58, 't2': 62, 'bh': 66, 'bl': 70, 'mods': 74, 'odo': 76},
         0x4d: {'dcv': 22, 'rpm': 30, 'soc': 34, 'pv': 35, 'pi': 39, 'speed': 48, 'range': 52,
-               'amb': 58, 't1': 62, 't2': 66, 'bh': 70, 'bl': 74},
+               'amb': 58, 't1': 62, 't2': 66, 'bh': 70, 'bl': 74, 'odo': 80},
     }
     STATE_SNAPSHOT_TEMPERATURES = (
         ('amb', 'ambient_temperature_c'), ('t1', 'motor_temp_c'), ('t2', 'inverter_temp_c'),
@@ -3250,6 +3255,8 @@ class Gen2:
                     out[name] = cls.telemetry_temperature(x, o[key], 128)
         if 'mods' in o:
             out['bms_modules_on_can'] = BinaryTools.unpack('uint8', x, o['mods'])
+        if 'odo' in o:
+            out['odometer_low_byte'] = BinaryTools.unpack('uint8', x, o['odo'])
 
         def text(value, fmt):
             return 'n/a' if value is None else format(value, fmt)
@@ -3945,7 +3952,7 @@ class Gen2:
             (70, 74, 'field', 'pack_temperature_coldest_c'),
             (74, 75, 'field', 'bms_modules_on_can'),
             (75, 76, 'reserved', 'constant 0x01 in all 334 marker-free accepted entries'),
-            (76, 77, 'unknown', 'not understood yet'),
+            (76, 77, 'field', 'odometer_low_byte'),
         ),
         (0x4d, 63): (
             (0, 4, 'field', 'subsecond_us'),
@@ -4058,7 +4065,7 @@ class Gen2:
             (70, 74, 'field', 'pack_temperature_warmest_c'),
             (74, 78, 'field', 'pack_temperature_coldest_c'),
             (78, 80, 'reserved', 'constant 0x01 in all 304 marker-free accepted entries'),
-            (80, 81, 'unknown', 'not understood yet'),
+            (80, 81, 'field', 'odometer_low_byte'),
             (81, 89, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
         ),
         (0x4e, 58): (
