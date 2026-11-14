@@ -3208,6 +3208,12 @@ class Gen2:
     #       of one ride its change matches the distance integrated from speed
     #       (median ratio 0.99 to 1.00 over 2 to 25 km, 2,197 pairs) and it
     #       is unchanged in 1,037 of 1,039 pairs with no movement.
+    #   err    u8 at 6 (all tiers) - snapshot_error_flag, the datasheet's
+    #       error flag (1 = reads failed), kept as read. Only 0 and 1 occur.
+    #       It is 1 exactly when the status byte (0x4B 10, 0x4C 14, 0x4D 18)
+    #       is nonzero (6,043 of 6,043), and in 6,041 of 6,043 exactly when
+    #       the DC bus voltage or the pack voltage reads 0, i.e. when the
+    #       controller or the BMS is not reporting.
     # The controller fields (dcv, rpm, t1, t2) are None when the DC bus
     # voltage reads 0: then the controller is not reporting (the record's
     # status bit 1 is set exactly then, and the motor and inverter
@@ -3216,10 +3222,10 @@ class Gen2:
     # in entries whose first byte flags failed reads.
     # message_type -> {field: payload offset}
     STATE_SNAPSHOT_FIELDS = {
-        0x4b: {'dcv': 14, 'rpm': 22, 'soc': 26, 'pv': 27, 'pi': 31, 'speed': 40, 'range': 44},
-        0x4c: {'dcv': 18, 'rpm': 26, 'soc': 30, 'pv': 31, 'pi': 35, 'speed': 44, 'range': 48,
+        0x4b: {'err': 6, 'dcv': 14, 'rpm': 22, 'soc': 26, 'pv': 27, 'pi': 31, 'speed': 40, 'range': 44},
+        0x4c: {'err': 6, 'dcv': 18, 'rpm': 26, 'soc': 30, 'pv': 31, 'pi': 35, 'speed': 44, 'range': 48,
                'amb': 54, 't1': 58, 't2': 62, 'bh': 66, 'bl': 70, 'mods': 74, 'odo': 76},
-        0x4d: {'dcv': 22, 'rpm': 30, 'soc': 34, 'pv': 35, 'pi': 39, 'speed': 48, 'range': 52,
+        0x4d: {'err': 6, 'dcv': 22, 'rpm': 30, 'soc': 34, 'pv': 35, 'pi': 39, 'speed': 48, 'range': 52,
                'amb': 58, 't1': 62, 't2': 66, 'bh': 70, 'bl': 74, 'odo': 80},
     }
     STATE_SNAPSHOT_TEMPERATURES = (
@@ -3239,6 +3245,7 @@ class Gen2:
         speed = BinaryTools.unpack('int32', x, o['speed'])
         range_km = BinaryTools.unpack('uint16', x, o['range'])
         out = {
+            'snapshot_error_flag': BinaryTools.unpack('uint8', x, o['err']),
             'state_of_charge_percent': BinaryTools.unpack('uint8', x, o['soc']),
             'pack_voltage_volts': pv / 1000.0 if pv else None,
             'battery_current_amps': BinaryTools.unpack('int32', x, o['pi']) / 1000.0 if pv else None,
@@ -3838,7 +3845,7 @@ class Gen2:
             (0, 4, 'field', 'subsecond_us'),
             (4, 5, 'field', 'sequence'),
             (5, 6, 'field', 'marker'),
-            (6, 7, 'unknown', 'not understood yet'),
+            (6, 7, 'field', 'snapshot_error_flag'),
             (7, 10, 'reserved', 'constant 0x00 in all 5405 marker-free accepted entries'),
             (10, 11, 'unknown', 'not understood yet'),
             (11, 14, 'reserved', 'constant 0x00 in all 5405 marker-free accepted entries'),
@@ -3930,7 +3937,7 @@ class Gen2:
             (0, 4, 'field', 'subsecond_us'),
             (4, 5, 'field', 'sequence'),
             (5, 6, 'field', 'marker'),
-            (6, 7, 'unknown', 'not understood yet'),
+            (6, 7, 'field', 'snapshot_error_flag'),
             (7, 10, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
             (10, 15, 'unknown', 'not understood yet'),
             (15, 18, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
@@ -4044,7 +4051,7 @@ class Gen2:
             (0, 4, 'field', 'subsecond_us'),
             (4, 5, 'field', 'sequence'),
             (5, 6, 'field', 'marker'),
-            (6, 7, 'unknown', 'not understood yet'),
+            (6, 7, 'field', 'snapshot_error_flag'),
             (7, 10, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
             (10, 19, 'unknown', 'not understood yet'),
             (19, 22, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),

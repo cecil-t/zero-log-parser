@@ -284,3 +284,15 @@ def test_medium_and_large_tiers_decode_the_odometer_low_byte():
             assert sd['odometer_low_byte'] == value, (message_type, value)
         layout = Gen2.payload_layout(message_type, TIERS[message_type][1])
         assert (offset, offset + 1, 'field', 'odometer_low_byte') in layout
+
+
+def test_every_tier_keeps_the_error_flag_as_read():
+    # Byte 6, the datasheet's error flag (1 = reads failed). Invented values.
+    for message_type in TIERS:
+        for value in (0, 1):
+            buf = _measured(message_type)
+            buf[6] = value
+            sd = Gen2.state_snapshot(message_type, buf)['structured_data']
+            assert sd['snapshot_error_flag'] == value, (message_type, value)
+        layout = Gen2.payload_layout(message_type, TIERS[message_type][1])
+        assert (6, 7, 'field', 'snapshot_error_flag') in layout
