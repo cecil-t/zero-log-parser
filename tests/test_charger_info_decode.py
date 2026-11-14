@@ -163,3 +163,124 @@ def test_implausible_subsecond_value_falls_back_to_raw_hex():
     for value in (1000001, 0x7fffffff, 0xffffffff):
         out = Gen2.charger_info(_payload(_record(), subsecond=value))
         assert 'structured_data' not in out, value
+
+
+# ---- record measurements (atomicdog Gen3 datasheet layout, checked in analysis/gen3_mbb_partials.md) ----
+# All values below are invented.
+
+from zero_log_parser import Gen3TelemetryFirmware
+
+
+def _measured_record(raw_currents, **kw):
+    """A record with every measurement set; raw_currents is (dc, ac, set-point) as the u16 counts
+    the record stores, whose unit depends on the firmware revision."""
+    rec = _record(**kw)
+    dc, ac, setpoint = raw_currents
+    struct.pack_into('<I', rec, 12, 109875)        # DC output 109.875 V
+    struct.pack_into('<H', rec, 16, dc)
+    struct.pack_into('<H', rec, 18, 4321)          # undecoded (maximum charge current)
+    struct.pack_into('<I', rec, 20, 121000)        # maximum charge voltage 121 V
+    rec[24] = 13                                   # AC input current limit, A
+    rec[25] = 42                                   # variant code
+    rec[26] = 229                                  # AC input 229 V
+    struct.pack_into('<H', rec, 27, ac)
+    rec[30] = 77                                   # undecoded
+    struct.pack_into('<H', rec, 38, 31)            # charger type code
+    struct.pack_into('<I', rec, 40, 114250)        # set-point voltage 114.25 V
+    struct.pack_into('<H', rec, 44, setpoint)
+    struct.pack_into('<H', rec, 46, 14)            # set-point AC input current, A
+    rec[48] = 1                                    # enabled
+    return rec
+
+
+def test_record_measurements_decode_in_amps_from_rev_16():
+    rec = _measured_record((23, 9, 31))
+    out = Gen2.charger_info(_payload(rec), firmware=Gen3TelemetryFirmware(16), timestamp=1_600_000_000)
+    c = out['structured_data']['chargers'][0]
+    assert c['dc_output_voltage_volts'] == 109.875
+    assert c['dc_output_current_amps'] == 23.0
+    assert c['max_charge_voltage_volts'] == 121.0
+    assert c['ac_input_current_limit_amps'] == 13
+    assert c['charger_variant'] == 42
+    assert c['ac_voltage_volts'] == 229
+    assert c['ac_current_amps'] == 9.0
+    assert c['charger_type_code'] == 31
+    assert c['setpoint_voltage_volts'] == 114.25
+    assert c['setpoint_current_amps'] == 31.0
+    assert c['setpoint_ac_input_current_amps'] == 14
+    assert c['enabled'] == 1
+    assert 'out 109.875V 23A' in out['conditions'] and 'AC 229V 9A' in out['conditions']
+    assert out['conditions'].endswith('enabled')
+
+
+def test_record_currents_are_milliamps_up_to_rev_15():
+    rec = _measured_record((23456, 9870, 65535))
+    c = Gen2.charger_info(_payload(rec), firmware=Gen3TelemetryFirmware(15), timestamp=1)['structured_data']['chargers'][0]
+    assert (c['dc_output_current_amps'], c['ac_current_amps'], c['setpoint_current_amps']) == (23.456, 9.87, 65.535)
+    # the set-point AC input current is whole amps on every revision
+    assert c['setpoint_ac_input_current_amps'] == 14
+
+
+def test_record_currents_are_withheld_without_a_known_revision():
+    rec = _measured_record((23, 9, 31))
+    for firmware in (None, Gen3TelemetryFirmware(None), Gen3TelemetryFirmware('Unknown')):
+        out = Gen2.charger_info(_payload(rec), firmware=firmware, timestamp=1)
+        c = out['structured_data']['chargers'][0]
+        assert c['dc_output_current_amps'] is None and c['ac_current_amps'] is None and c['setpoint_current_amps'] is None
+        assert c['dc_output_voltage_volts'] == 109.875           # the rest does not depend on the revision
+        assert 'out 109.875V n/aA' in out['conditions']
+
+
+def test_disabled_charger_is_named_in_conditions():
+    rec = _measured_record((0, 0, 0))
+    rec[48] = 0
+    out = Gen2.charger_info(_payload(rec), firmware=Gen3TelemetryFirmware(30), timestamp=1)
+    assert out['structured_data']['chargers'][0]['enabled'] == 0
+    assert out['conditions'].endswith('disabled')
+
+
+def test_second_record_reads_its_own_measurements():
+    first = _measured_record((10, 5, 20))
+    second = _measured_record((11, 6, 21), charger_id=0x11, fill=9)
+    struct.pack_into('<I', second, 12, 110001)
+    sd = Gen2.charger_info(_payload(first, second), firmware=Gen3TelemetryFirmware(20), timestamp=1)['structured_data']
+    assert [c['dc_output_current_amps'] for c in sd['chargers']] == [10.0, 11.0]
+    assert [c['dc_output_voltage_volts'] for c in sd['chargers']] == [109.875, 110.001]
+
+
+def _collected(payload, timestamp):
+    entry = Gen2.charger_info(payload)
+    entry.update(message_type='0x48', original_timestamp=timestamp)
+    return (timestamp, entry, 1)
+
+
+def test_redecode_fills_the_currents_from_the_header_revision():
+    rec = _measured_record((23, 9, 31))
+    collected = [_collected(_payload(rec), 1_600_000_000)]
+    assert collected[0][1]['structured_data']['chargers'][0]['dc_output_current_amps'] is None
+    Gen3TelemetryFirmware.redecode(collected, 30)
+    c = collected[0][1]['structured_data']['chargers'][0]
+    assert c['dc_output_current_amps'] == 23.0 and c['raw_hex'] == bytes(rec).hex()
+    assert collected[0][1]['structured_data']['subsecond_us'] == 250000
+
+
+def test_redecode_uses_the_revision_before_a_firmware_update():
+    # a 0x4E firmware-updated entry (rev 15 -> 16) after the charger entry: the charger entry was
+    # written under rev 15, so its counts are mA
+    update = bytearray(60)
+    struct.pack_into('<HH', update, 6, 15, 16)
+    update_entry = {'message_type': '0x4E', 'event': 'Firmware Build Info', 'original_timestamp': 1_600_000_500,
+                    'structured_data': {'raw_hex': bytes(update).hex()}}
+    rec = _measured_record((23456, 9870, 30000))
+    collected = [_collected(_payload(rec), 1_600_000_000), (1_600_000_500, update_entry, 2)]
+    Gen3TelemetryFirmware.redecode(collected, 16)
+    assert collected[0][1]['structured_data']['chargers'][0]['dc_output_current_amps'] == 23.456
+
+
+def test_redecode_leaves_marker_damaged_charger_entries_alone():
+    rec = _measured_record((23, 9, 31))
+    collected = [_collected(_payload(rec), 1_600_000_000)]
+    collected[0][1]['structured_data']['corrupted_fields'] = ['chargers.0.serial_number']
+    Gen3TelemetryFirmware.redecode(collected, 30)
+    sd = collected[0][1]['structured_data']
+    assert sd['chargers'][0]['dc_output_current_amps'] is None and sd['corrupted_fields'] == ['chargers.0.serial_number']

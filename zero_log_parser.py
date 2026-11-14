@@ -2874,28 +2874,59 @@ class Gen2:
     # Entry type 0x48: charger table. A 6-byte prefix (see fst_entry_prefix)
     # followed by one 49-byte record per charger unit. Payloads are 55 bytes
     # (one charger) or 104 bytes (two: the second is the first's layout again,
-    # not a different structure). Each record, offsets relative to its start:
-    #   0-9   name, 10 bytes, ASCII, NUL padded (5 values seen, see below)
-    #  10-11  flags, 2 bytes (first byte is 0x80 or 0x20 in 95.7% of records)
-    #  12-28  17-byte measurement block, undecoded
-    #  29     hertz (0, or 47-63 in all but 14 of 10,104 records)
-    #  30     unidentified byte
+    # not a different structure). Each record, offsets relative to its start
+    # (names and layout from John Myers' (atomicdog) Gen3 log format
+    # datasheet, charger_details; each field checked against this file set,
+    # analysis/gen3_mbb_partials.md section 3):
+    #   0-9   name, 10 bytes, ASCII, NUL padded
+    #  10-11  flags, u16 (the datasheet's status word)
+    #  12-15  DC output voltage, u32 mV
+    #  16-17  DC output current, u16: mA on MBB firmware rev 15 and earlier,
+    #         A from rev 16 (CHARGER_CURRENT_MA_MAX_REV)
+    #  18-19  undecoded (the datasheet's maximum charge current)
+    #  20-23  maximum charge voltage, u32 mV
+    #  24     AC input current limit, u8 A
+    #  25     charger variant code, u8
+    #  26     AC input voltage, u8 V
+    #  27-28  AC input current, u16, mA or A as 16-17
+    #  29     hertz
+    #  30     undecoded (the datasheet's charger temperature; does not fit it)
     #  31     id (0x10, 0x11, 0x12)
     #  32-33  version, u16 LE
     #  34-37  serial number, u32 LE
-    #  38-48  11-byte trailer, undecoded
-    # Evidence and full-population validation: analysis/fst_part1_decoders.md.
+    #  38-39  charger type code, u16
+    #  40-43  set-point charge voltage, u32 mV
+    #  44-45  set-point charge current, u16, mA or A as 16-17
+    #  46-47  set-point AC input current, u16 A (A on every revision)
+    #  48     enabled flag, u8
+    # Evidence for the original fields: analysis/fst_part1_decoders.md.
     CHARGER_RECORD_OFFSET = 6
     CHARGER_RECORD_LEN = 49
+    # The three charger currents count mA up to this MBB firmware revision and
+    # A after it (the datasheet says rev 7-15; in this file set every record
+    # of rev 6-15 reads as mA and every record of rev 16 and later as A).
+    CHARGER_CURRENT_MA_MAX_REV = 15
 
     @classmethod
-    def charger_info(cls, x):
+    def charger_current(cls, record, offset, rev):
+        """One of the three firmware-dependent charger currents (u16 at
+        record offset 16, 27 or 44), in A; None when the revision the entry
+        was written under is not known, because the unit is then unknown."""
+        if not isinstance(rev, int):
+            return None
+        raw = BinaryTools.unpack('uint16', record, offset)
+        return raw / 1000.0 if rev <= cls.CHARGER_CURRENT_MA_MAX_REV else float(raw)
+
+    @classmethod
+    def charger_info(cls, x, firmware=None, timestamp=None):
         """Type 0x48 - charger table (55 or 104 bytes: one or two 49-byte
         charger records after the shared 6-byte prefix).
 
-        The name, flags, hertz, id, version and serial number are decoded.
-        The 17-byte measurement block, the single unidentified byte and the
-        11-byte trailer are kept, undecoded, in each record's raw_hex.
+        The record fields are listed in the comment above. The three
+        currents need the MBB firmware revision the entry was written under
+        (firmware, a Gen3TelemetryFirmware, at timestamp); without it they
+        are None. The maximum charge current, the byte at record offset 30
+        and nothing else stay undecoded, in each record's raw_hex.
 
         A payload whose length is not the prefix plus a whole number of
         records, or whose name field is not NUL-padded printable ASCII,
@@ -2910,13 +2941,7 @@ class Gen2:
         if prefix['subsecond_us'] > cls.FST_SUBSECOND_MAX_US:
             return cls.unhandled_entry_format(0x48, x)
 
-        prefix = cls.fst_entry_prefix(x)
-        if prefix['subsecond_us'] > cls.FST_SUBSECOND_MAX_US:
-            return cls.unhandled_entry_format(0x48, x)
-
-        prefix = cls.fst_entry_prefix(x)
-        if prefix['subsecond_us'] > cls.FST_SUBSECOND_MAX_US:
-            return cls.unhandled_entry_format(0x48, x)
+        rev = firmware.rev_at(timestamp) if firmware is not None and timestamp is not None else None
 
         chargers = []
         for index in range(record_bytes // cls.CHARGER_RECORD_LEN):
@@ -2931,10 +2956,22 @@ class Gen2:
             chargers.append({
                 'name': name_text.decode('ascii').strip(),
                 'flags': BinaryTools.unpack('uint16', record, 10),
+                'dc_output_voltage_volts': BinaryTools.unpack('uint32', record, 12) / 1000.0,
+                'dc_output_current_amps': cls.charger_current(record, 16, rev),
+                'max_charge_voltage_volts': BinaryTools.unpack('uint32', record, 20) / 1000.0,
+                'ac_input_current_limit_amps': BinaryTools.unpack('uint8', record, 24),
+                'charger_variant': BinaryTools.unpack('uint8', record, 25),
+                'ac_voltage_volts': BinaryTools.unpack('uint8', record, 26),
+                'ac_current_amps': cls.charger_current(record, 27, rev),
                 'hertz': BinaryTools.unpack('uint8', record, 29),
                 'id': BinaryTools.unpack('uint8', record, 31),
                 'version': BinaryTools.unpack('uint16', record, 32),
                 'serial_number': BinaryTools.unpack('uint32', record, 34),
+                'charger_type_code': BinaryTools.unpack('uint16', record, 38),
+                'setpoint_voltage_volts': BinaryTools.unpack('uint32', record, 40) / 1000.0,
+                'setpoint_current_amps': cls.charger_current(record, 44, rev),
+                'setpoint_ac_input_current_amps': BinaryTools.unpack('uint16', record, 46),
+                'enabled': BinaryTools.unpack('uint8', record, 48),
                 'raw_hex': bytes(record).hex(),
             })
 
@@ -2942,9 +2979,15 @@ class Gen2:
         structured_data['charger_count'] = len(chargers)
         structured_data['chargers'] = chargers
 
+        def amps(value):
+            return 'n/a' if value is None else f'{value:g}'
+
         conditions = '; '.join(
             f"{c['name']} id {c['id']}, serial {c['serial_number']}, "
-            f"version {c['version']}, {c['hertz']} Hz"
+            f"version {c['version']}, {c['hertz']} Hz, "
+            f"out {c['dc_output_voltage_volts']:.3f}V {amps(c['dc_output_current_amps'])}A, "
+            f"AC {c['ac_voltage_volts']}V {amps(c['ac_current_amps'])}A, "
+            f"{'enabled' if c['enabled'] else 'disabled'}"
             for c in chargers
         )
 
@@ -3912,24 +3955,24 @@ class Gen2:
     CHARGER_RECORD_LAYOUT = (
         (0, 10, 'field', 'chargers.name'),
         (10, 12, 'field', 'chargers.flags'),
-        (12, 15, 'unknown', 'not understood yet'),
-        (15, 16, 'reserved', 'constant 0x00 in all 11068 marker-free accepted charger records'),
-        (16, 22, 'unknown', 'not understood yet'),
-        (22, 23, 'reserved', 'constant 0x01 in all 11068 marker-free accepted charger records'),
-        (23, 24, 'reserved', 'constant 0x00 in all 11068 marker-free accepted charger records'),
-        (24, 29, 'unknown', 'not understood yet'),
+        (12, 16, 'field', 'chargers.dc_output_voltage_volts'),
+        (16, 18, 'field', 'chargers.dc_output_current_amps'),
+        (18, 20, 'unknown', 'not understood yet (the datasheet maximum charge current; the set-point current exceeds it in 46% of records)'),
+        (20, 24, 'field', 'chargers.max_charge_voltage_volts'),
+        (24, 25, 'field', 'chargers.ac_input_current_limit_amps'),
+        (25, 26, 'field', 'chargers.charger_variant'),
+        (26, 27, 'field', 'chargers.ac_voltage_volts'),
+        (27, 29, 'field', 'chargers.ac_current_amps'),
         (29, 30, 'field', 'chargers.hertz'),
-        (30, 31, 'unknown', 'not understood yet'),
+        (30, 31, 'unknown', 'not understood yet (the datasheet charger temperature; it does not follow ambient)'),
         (31, 32, 'field', 'chargers.id'),
         (32, 34, 'field', 'chargers.version'),
         (34, 38, 'field', 'chargers.serial_number'),
-        (38, 39, 'unknown', 'not understood yet'),
-        (39, 40, 'reserved', 'constant 0x00 in all 11068 marker-free accepted charger records'),
-        (40, 43, 'unknown', 'not understood yet'),
-        (43, 44, 'reserved', 'constant 0x00 in all 11068 marker-free accepted charger records'),
-        (44, 47, 'unknown', 'not understood yet'),
-        (47, 48, 'reserved', 'constant 0x00 in all 11068 marker-free accepted charger records'),
-        (48, 49, 'unknown', 'not understood yet'),
+        (38, 40, 'field', 'chargers.charger_type_code'),
+        (40, 44, 'field', 'chargers.setpoint_voltage_volts'),
+        (44, 46, 'field', 'chargers.setpoint_current_amps'),
+        (46, 48, 'field', 'chargers.setpoint_ac_input_current_amps'),
+        (48, 49, 'field', 'chargers.enabled'),
     )
 
     @classmethod
@@ -5976,7 +6019,9 @@ class Gen3TelemetryFirmware:
     """The MBB firmware revision each 0x51 / 0x52 / 0x53 entry of one FST/Gen3
     file was written under, for the fields whose meaning changed between
     revisions (the ambient scale and the flag bit maps, see
-    Gen2.telemetry_ambient and Gen2.telemetry_flag_map_is_shifted).
+    Gen2.telemetry_ambient and Gen2.telemetry_flag_map_is_shifted). The
+    0x48 charger currents use it too (mA up to rev 15, A after, see
+    Gen2.charger_current).
 
     The header revision is the one at download time. The file's 0x4E
     firmware-updated entries (payload 6 u16 previous revision, payload 8 u16
@@ -6029,6 +6074,18 @@ class Gen3TelemetryFirmware:
         return message_type, bytearray.fromhex(structured['raw_hex'])
 
     @classmethod
+    def _decoded_charger(cls, payload):
+        """The payload bytes of a 0x48 entry charger_info accepted, rebuilt
+        from its prefix fields and each record's raw_hex, else None. An entry
+        with fields withheld for page-marker damage is left as it is."""
+        structured = payload.get('structured_data')
+        if payload.get('message_type') != '0x48' or not structured or 'chargers' not in structured \
+                or structured.get('corrupted_fields') or payload.get('original_timestamp') is None:
+            return None
+        head = struct.pack('<IBB', structured['subsecond_us'], structured['sequence'], structured['marker'])
+        return bytearray(head + b''.join(bytes.fromhex(c['raw_hex']) for c in structured['chargers']))
+
+    @classmethod
     def from_entries(cls, header_rev, payloads):
         updates = []
         first_x100 = None
@@ -6063,6 +6120,13 @@ class Gen3TelemetryFirmware:
         payloads = [entry for _sort, entry, _num in collected_entries]
         firmware = cls.from_entries(header_rev, payloads)
         for entry in payloads:
+            charger = cls._decoded_charger(entry)
+            if charger is not None:
+                result = Gen2.charger_info(charger, firmware=firmware, timestamp=entry['original_timestamp'])
+                entry['event'] = result['event']
+                entry['conditions'] = result['conditions']
+                entry['structured_data'] = result['structured_data']
+                continue
             decoded = cls._decoded_telemetry(entry)
             if decoded is None:
                 continue

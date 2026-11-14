@@ -18,7 +18,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from zero_log_parser import Gen2, LogFile
+from zero_log_parser import Gen2, Gen3TelemetryFirmware, LogFile
 
 FIELD, RESERVED, UNKNOWN = Gen2.LAYOUT_FIELD, Gen2.LAYOUT_RESERVED, Gen2.LAYOUT_UNKNOWN
 
@@ -171,6 +171,10 @@ def _flatten(value, prefix=''):
 
 
 def _output(message_type, length, payload):
+    if message_type == 0x48:
+        # the charger currents need the firmware revision the entry was written under
+        result = Gen2.charger_info(bytearray(payload), firmware=Gen3TelemetryFirmware(30), timestamp=0)
+        return (result.get('event'), result.get('conditions'), _flatten(result.get('structured_data') or {}))
     parser = Gen2._entry_parsers(_log_type(message_type, length), gen3_text=True)[message_type]
     result = parser(bytearray(payload))
     return (result.get('event'), result.get('conditions'), _flatten(result.get('structured_data') or {}))
