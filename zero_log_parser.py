@@ -3133,17 +3133,84 @@ class Gen2:
     }
     STATE_SNAPSHOT_TAGS = frozenset(
         ['RUN', 'PWSU', 'CHRG', 'WAIT', 'STOP', 'HIB', 'WAKE', 'FWUP', 'STRT'])
+    # The block before and after the tag, at the offsets of John Myers'
+    # (atomicdog) Gen3 datasheet (periodic_small / periodic_medium /
+    # periodic_large, which this file set writes on MBB firmware rev 6-17),
+    # each field checked in analysis/gen3_mbb_partials.md section 4:
+    #   dcv    s32 LE mV - DC bus voltage (multiples of 100 mV)
+    #   rpm    s32 LE - motor RPM
+    #   soc    u8 % - state of charge
+    #   pv     u32 LE mV - pack voltage
+    #   pi     s32 LE mA - battery current (negative while charging)
+    #   speed  s32 LE mm/h - speed (multiples of 56,250 mm/h)
+    #   amb    s32 LE C - ambient temperature, plain C on this firmware
+    #   t1/t2  s32 LE C - motor / inverter temperature
+    #   bh/bl  s32 LE C - pack warmest / coldest temperature
+    #   mods   u8 - BMS modules on CAN
+    # The controller fields (dcv, rpm, t1, t2) are None when the DC bus
+    # voltage reads 0: then the controller is not reporting (the record's
+    # status bit 1 is set exactly then, and the motor and inverter
+    # temperatures read 0, in every entry measured). The pack voltage and
+    # current are None when the pack voltage reads 0, which happens only
+    # in entries whose first byte flags failed reads.
+    # message_type -> {field: payload offset}
+    STATE_SNAPSHOT_FIELDS = {
+        0x4b: {'dcv': 14, 'rpm': 22, 'soc': 26, 'pv': 27, 'pi': 31, 'speed': 40},
+        0x4c: {'dcv': 18, 'rpm': 26, 'soc': 30, 'pv': 31, 'pi': 35, 'speed': 44,
+               'amb': 54, 't1': 58, 't2': 62, 'bh': 66, 'bl': 70, 'mods': 74},
+        0x4d: {'dcv': 22, 'rpm': 30, 'soc': 34, 'pv': 35, 'pi': 39, 'speed': 48,
+               'amb': 58, 't1': 62, 't2': 66, 'bh': 70, 'bl': 74},
+    }
+    STATE_SNAPSHOT_TEMPERATURES = (
+        ('amb', 'ambient_temperature_c'), ('t1', 'motor_temp_c'), ('t2', 'inverter_temp_c'),
+        ('bh', 'pack_temperature_warmest_c'), ('bl', 'pack_temperature_coldest_c'),
+    )
+
+    @classmethod
+    def state_snapshot_fields(cls, message_type, x):
+        """The decoded block of one accepted 0x4B/0x4C/0x4D MBB snapshot
+        (see STATE_SNAPSHOT_FIELDS). Returns (structured_data updates,
+        conditions fragment)."""
+        o = cls.STATE_SNAPSHOT_FIELDS[message_type]
+        dcv = BinaryTools.unpack('int32', x, o['dcv'])
+        controller = dcv != 0
+        pv = BinaryTools.unpack('uint32', x, o['pv'])
+        speed = BinaryTools.unpack('int32', x, o['speed'])
+        out = {
+            'state_of_charge_percent': BinaryTools.unpack('uint8', x, o['soc']),
+            'pack_voltage_volts': pv / 1000.0 if pv else None,
+            'battery_current_amps': BinaryTools.unpack('int32', x, o['pi']) / 1000.0 if pv else None,
+            'dc_bus_voltage_volts': dcv / 1000.0 if controller else None,
+            'motor_rpm': BinaryTools.unpack('int32', x, o['rpm']) if controller else None,
+            'speed_kmh': speed / cls.TELEMETRY_SPEED_MM_PER_KM if speed >= 0 else None,
+        }
+        for key, name in cls.STATE_SNAPSHOT_TEMPERATURES:
+            if key in o:
+                if key in ('t1', 't2') and not controller:
+                    out[name] = None
+                else:
+                    out[name] = cls.telemetry_temperature(x, o[key], 128)
+        if 'mods' in o:
+            out['bms_modules_on_can'] = BinaryTools.unpack('uint8', x, o['mods'])
+
+        def text(value, fmt):
+            return 'n/a' if value is None else format(value, fmt)
+        conditions = (f"SOC:{out['state_of_charge_percent']}%, "
+                      f"Vpack:{text(out['pack_voltage_volts'], '.3f')}V, "
+                      f"I:{text(out['battery_current_amps'], '.3f')}A, "
+                      f"speed:{text(out['speed_kmh'], '.1f')}km/h")
+        return out, conditions
 
     @classmethod
     def state_snapshot(cls, message_type, x):
         """Types 0x4B/0x4C/0x4D - state-tagged snapshot (46/77/89 bytes).
 
-        Decodes only what was confirmed: the tier (implied by the type), the
-        state tag, and the shared 6-byte prefix. Every other byte is
-        unidentified and is kept as-is in raw_hex rather than guessed at.
-        Anything that is not exactly the expected length, or whose tag is
-        not one of the nine known values, falls back to the raw-hex report
-        unhandled_entry_format() already gives these types.
+        Decodes the tier (implied by the type), the state tag, the shared
+        6-byte prefix and the block in STATE_SNAPSHOT_FIELDS. Every other
+        byte is unidentified and is kept as-is in raw_hex rather than
+        guessed at. Anything that is not exactly the expected length, or
+        whose tag is not one of the nine known values, falls back to the
+        raw-hex report unhandled_entry_format() already gives these types.
         """
         tier, length, tag_offset = cls.STATE_SNAPSHOT_TIERS[message_type]
         if len(x) != length:
@@ -3163,11 +3230,13 @@ class Gen2:
             'state': state,
         }
         structured_data.update(prefix)
+        fields, field_conditions = cls.state_snapshot_fields(message_type, x)
+        structured_data.update(fields)
         structured_data['raw_hex'] = bytes(x).hex()
 
         return {
             'event': 'State Snapshot',
-            'conditions': f'State: {state}, tier: {tier}',
+            'conditions': f'State: {state}, tier: {tier}, {field_conditions}',
             'structured_data': structured_data
         }
 
@@ -3682,16 +3751,16 @@ class Gen2:
             (7, 10, 'reserved', 'constant 0x00 in all 5405 marker-free accepted entries'),
             (10, 11, 'unknown', 'not understood yet'),
             (11, 14, 'reserved', 'constant 0x00 in all 5405 marker-free accepted entries'),
-            (14, 17, 'unknown', 'not understood yet'),
-            (17, 18, 'reserved', 'constant 0x00 in all 5405 marker-free accepted entries'),
-            (18, 24, 'unknown', 'not understood yet'),
-            (24, 26, 'reserved', 'constant 0x00 in all 5405 marker-free accepted entries'),
-            (26, 30, 'unknown', 'not understood yet'),
-            (30, 31, 'reserved', 'constant 0x00 in all 5405 marker-free accepted entries'),
-            (31, 35, 'unknown', 'not understood yet'),
+            (14, 18, 'field', 'dc_bus_voltage_volts'),
+            (18, 22, 'unknown', 'not understood yet'),
+            (22, 26, 'field', 'motor_rpm'),
+            (26, 27, 'field', 'state_of_charge_percent'),
+            (27, 31, 'field', 'pack_voltage_volts'),
+            (31, 35, 'field', 'battery_current_amps'),
             (35, 39, 'field', 'state'),
             (39, 40, 'reserved', 'constant 0x00 in all 5405 marker-free accepted entries'),
-            (40, 45, 'unknown', 'not understood yet'),
+            (40, 44, 'field', 'speed_kmh'),
+            (44, 45, 'unknown', 'not understood yet'),
             (45, 46, 'reserved', 'constant 0x00 in all 5405 marker-free accepted entries'),
         ),
         (0x4c, 55): (
@@ -3775,28 +3844,24 @@ class Gen2:
             (7, 10, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
             (10, 15, 'unknown', 'not understood yet'),
             (15, 18, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
-            (18, 21, 'unknown', 'not understood yet'),
-            (21, 22, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
-            (22, 28, 'unknown', 'not understood yet'),
-            (28, 30, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
-            (30, 34, 'unknown', 'not understood yet'),
-            (34, 35, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
-            (35, 39, 'unknown', 'not understood yet'),
+            (18, 22, 'field', 'dc_bus_voltage_volts'),
+            (22, 26, 'unknown', 'not understood yet'),
+            (26, 30, 'field', 'motor_rpm'),
+            (30, 31, 'field', 'state_of_charge_percent'),
+            (31, 35, 'field', 'pack_voltage_volts'),
+            (35, 39, 'field', 'battery_current_amps'),
             (39, 43, 'field', 'state'),
             (43, 44, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
-            (44, 49, 'unknown', 'not understood yet'),
+            (44, 48, 'field', 'speed_kmh'),
+            (48, 49, 'unknown', 'not understood yet'),
             (49, 50, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
-            (50, 55, 'unknown', 'not understood yet'),
-            (55, 58, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
-            (58, 59, 'unknown', 'not understood yet'),
-            (59, 62, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
-            (62, 63, 'unknown', 'not understood yet'),
-            (63, 66, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
-            (66, 67, 'unknown', 'not understood yet'),
-            (67, 70, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
-            (70, 71, 'unknown', 'not understood yet'),
-            (71, 74, 'reserved', 'constant 0x00 in all 334 marker-free accepted entries'),
-            (74, 75, 'unknown', 'not understood yet'),
+            (50, 54, 'unknown', 'not understood yet'),
+            (54, 58, 'field', 'ambient_temperature_c'),
+            (58, 62, 'field', 'motor_temp_c'),
+            (62, 66, 'field', 'inverter_temp_c'),
+            (66, 70, 'field', 'pack_temperature_warmest_c'),
+            (70, 74, 'field', 'pack_temperature_coldest_c'),
+            (74, 75, 'field', 'bms_modules_on_can'),
             (75, 76, 'reserved', 'constant 0x01 in all 334 marker-free accepted entries'),
             (76, 77, 'unknown', 'not understood yet'),
         ),
@@ -3894,28 +3959,23 @@ class Gen2:
             (7, 10, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
             (10, 19, 'unknown', 'not understood yet'),
             (19, 22, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
-            (22, 25, 'unknown', 'not understood yet'),
-            (25, 26, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
-            (26, 32, 'unknown', 'not understood yet'),
-            (32, 34, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
-            (34, 37, 'unknown', 'not understood yet'),
-            (37, 38, 'reserved', 'constant 0x01 in all 304 marker-free accepted entries'),
-            (38, 39, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
-            (39, 43, 'unknown', 'not understood yet'),
+            (22, 26, 'field', 'dc_bus_voltage_volts'),
+            (26, 30, 'unknown', 'not understood yet'),
+            (30, 34, 'field', 'motor_rpm'),
+            (34, 35, 'field', 'state_of_charge_percent'),
+            (35, 39, 'field', 'pack_voltage_volts'),
+            (39, 43, 'field', 'battery_current_amps'),
             (43, 47, 'field', 'state'),
             (47, 48, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
-            (48, 53, 'unknown', 'not understood yet'),
+            (48, 52, 'field', 'speed_kmh'),
+            (52, 53, 'unknown', 'not understood yet'),
             (53, 54, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
-            (54, 59, 'unknown', 'not understood yet'),
-            (59, 62, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
-            (62, 63, 'unknown', 'not understood yet'),
-            (63, 66, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
-            (66, 67, 'unknown', 'not understood yet'),
-            (67, 70, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
-            (70, 71, 'unknown', 'not understood yet'),
-            (71, 74, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
-            (74, 75, 'unknown', 'not understood yet'),
-            (75, 78, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),
+            (54, 58, 'unknown', 'not understood yet'),
+            (58, 62, 'field', 'ambient_temperature_c'),
+            (62, 66, 'field', 'motor_temp_c'),
+            (66, 70, 'field', 'inverter_temp_c'),
+            (70, 74, 'field', 'pack_temperature_warmest_c'),
+            (74, 78, 'field', 'pack_temperature_coldest_c'),
             (78, 80, 'reserved', 'constant 0x01 in all 304 marker-free accepted entries'),
             (80, 81, 'unknown', 'not understood yet'),
             (81, 89, 'reserved', 'constant 0x00 in all 304 marker-free accepted entries'),

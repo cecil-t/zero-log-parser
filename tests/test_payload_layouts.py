@@ -121,6 +121,9 @@ def _payload(message_type, length):
             (t, v[1]) for t, v in Gen2.STATE_SNAPSHOT_TIERS.items()}:
         tag = Gen2.STATE_SNAPSHOT_TIERS[message_type][2]
         buf[tag:tag + 4] = b'RUN\x00'
+        for key, _name in Gen2.STATE_SNAPSHOT_TEMPERATURES:   # the temperature words must hold a plausible value
+            if key in Gen2.STATE_SNAPSHOT_FIELDS[message_type]:
+                struct.pack_into('<i', buf, Gen2.STATE_SNAPSHOT_FIELDS[message_type][key], 10)
     elif message_type in (0x4b, 0x4c, 0x4d):                # BMS cell telemetry
         shift = Gen2.BMS_CELL_TELEMETRY_TIERS[message_type][0]
         buf[10 + shift] = 0x00

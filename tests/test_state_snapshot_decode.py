@@ -154,3 +154,93 @@ def test_implausible_subsecond_value_falls_back_to_raw_hex():
     for value in (1000001, 0x7fffffff, 0xffffffff):
         out = Gen2.state_snapshot(0x4b, _payload(0x4b, _tag('RUN'), subsecond=value))
         assert 'structured_data' not in out, value
+
+
+# ---- the decoded block (atomicdog Gen3 datasheet periodic_small/medium/large, checked in
+# analysis/gen3_mbb_partials.md section 4). All values are invented. ----
+
+FIELDS = {
+    0x4b: {'dcv': 14, 'rpm': 22, 'soc': 26, 'pv': 27, 'pi': 31, 'speed': 40},
+    0x4c: {'dcv': 18, 'rpm': 26, 'soc': 30, 'pv': 31, 'pi': 35, 'speed': 44,
+           'amb': 54, 't1': 58, 't2': 62, 'bh': 66, 'bl': 70, 'mods': 74},
+    0x4d: {'dcv': 22, 'rpm': 30, 'soc': 34, 'pv': 35, 'pi': 39, 'speed': 48,
+           'amb': 58, 't1': 62, 't2': 66, 'bh': 70, 'bl': 74},
+}
+
+
+def _measured(message_type, dcv=104300, pv=104512, pi=-23456, speed=48 * 56250, temps=(17, 41, 33, 22, 19)):
+    buf = _payload(message_type, _tag('RUN'))
+    o = FIELDS[message_type]
+    struct.pack_into('<i', buf, o['dcv'], dcv)
+    struct.pack_into('<i', buf, o['rpm'], 2713)
+    buf[o['soc']] = 63
+    struct.pack_into('<I', buf, o['pv'], pv)
+    struct.pack_into('<i', buf, o['pi'], pi)
+    struct.pack_into('<i', buf, o['speed'], speed)
+    if 'amb' in o:
+        for key, value in zip(('amb', 't1', 't2', 'bh', 'bl'), temps):
+            struct.pack_into('<i', buf, o[key], value)
+    if 'mods' in o:
+        buf[o['mods']] = 2
+    return buf
+
+
+def test_every_tier_decodes_the_shared_block():
+    for message_type in TIERS:
+        sd = Gen2.state_snapshot(message_type, _measured(message_type))['structured_data']
+        assert sd['dc_bus_voltage_volts'] == 104.3
+        assert sd['motor_rpm'] == 2713
+        assert sd['state_of_charge_percent'] == 63
+        assert sd['pack_voltage_volts'] == 104.512
+        assert sd['battery_current_amps'] == -23.456
+        assert sd['speed_kmh'] == 2.7               # 48 x 56,250 mm/h
+        assert sd['state'] == 'RUN'
+
+
+def test_medium_and_large_tiers_decode_temperatures():
+    for message_type in (0x4c, 0x4d):
+        sd = Gen2.state_snapshot(message_type, _measured(message_type))['structured_data']
+        assert (sd['ambient_temperature_c'], sd['motor_temp_c'], sd['inverter_temp_c'],
+                sd['pack_temperature_warmest_c'], sd['pack_temperature_coldest_c']) == (17, 41, 33, 22, 19)
+    sd = Gen2.state_snapshot(0x4b, _measured(0x4b))['structured_data']
+    assert 'ambient_temperature_c' not in sd and 'bms_modules_on_can' not in sd
+
+
+def test_medium_tier_decodes_the_bms_module_count():
+    assert Gen2.state_snapshot(0x4c, _measured(0x4c))['structured_data']['bms_modules_on_can'] == 2
+    assert 'bms_modules_on_can' not in Gen2.state_snapshot(0x4d, _measured(0x4d))['structured_data']
+
+
+def test_controller_fields_are_none_when_the_dc_bus_voltage_reads_zero():
+    for message_type in TIERS:
+        sd = Gen2.state_snapshot(message_type, _measured(message_type, dcv=0, temps=(17, 0, 0, 22, 19)))['structured_data']
+        assert sd['dc_bus_voltage_volts'] is None and sd['motor_rpm'] is None
+        assert sd['pack_voltage_volts'] == 104.512
+        if message_type != 0x4b:
+            assert sd['motor_temp_c'] is None and sd['inverter_temp_c'] is None
+            assert sd['ambient_temperature_c'] == 17 and sd['pack_temperature_coldest_c'] == 19
+
+
+def test_pack_fields_are_none_when_the_pack_voltage_reads_zero():
+    for message_type in TIERS:
+        out = Gen2.state_snapshot(message_type, _measured(message_type, pv=0, pi=0))
+        sd = out['structured_data']
+        assert sd['pack_voltage_volts'] is None and sd['battery_current_amps'] is None
+        assert sd['state_of_charge_percent'] == 63
+        assert 'Vpack:n/aV, I:n/aA' in out['conditions']
+
+
+def test_negative_speed_and_out_of_range_temperatures_are_none():
+    sd = Gen2.state_snapshot(0x4c, _measured(0x4c, speed=-56250, temps=(17, 41, 33, 500, 19)))['structured_data']
+    assert sd['speed_kmh'] is None
+    assert sd['pack_temperature_warmest_c'] is None and sd['pack_temperature_coldest_c'] == 19
+
+
+def test_negative_temperatures_decode():
+    sd = Gen2.state_snapshot(0x4d, _measured(0x4d, temps=(-7, 41, 33, -3, -5)))['structured_data']
+    assert (sd['ambient_temperature_c'], sd['pack_temperature_warmest_c'], sd['pack_temperature_coldest_c']) == (-7, -3, -5)
+
+
+def test_conditions_carry_state_tier_and_pack_summary():
+    out = Gen2.state_snapshot(0x4b, _measured(0x4b))
+    assert out['conditions'] == 'State: RUN, tier: small, SOC:63%, Vpack:104.512V, I:-23.456A, speed:2.7km/h'
