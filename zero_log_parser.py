@@ -3560,8 +3560,8 @@ class Gen2:
     # evidence in analysis/gen3_mbb_partials.md section 5):
     #   tag-29  u8 - snapshot_flags, the datasheet's freeze flags byte, kept
     #       as the value read. Bit 0x20 is set only outside RUN and always
-    #       with speed 0 (the datasheet: speed not valid); bit 0x80 only when
-    #       no BMS module is on CAN; bit 0x40 is not identified.
+    #       with speed 0 (the datasheet: speed not valid); bit 0x80 exactly
+    #       when no contactor is closed; bit 0x40 is not identified.
     #   tag-33  u8, 0x53 at 95 bytes only - snapshot_error_flags, the
     #       datasheet's freeze error byte: 0xc0 exactly when no BMS module is
     #       on CAN, else 0 (at 99 bytes the same byte is constant 0).
