@@ -180,3 +180,69 @@ def test_zero_voltage_with_the_bms_flag_clear_stays_a_raw_zero():
 def test_rejected_payloads_still_fall_back_to_raw_hex():
     payload = _payload(0x52, 92, _tag('RUN'))
     assert Gen2.vehicle_state_telemetry_tier(0x52, payload)['event'] != 'Vehicle State Telemetry'
+
+
+# ---- flag byte, BMS module and contactor counts, controller code (atomicdog Gen3 datasheet
+# periodic_medium2/large2, checked in analysis/gen3_mbb_partials.md section 5). Values invented. ----
+
+# (type, length) -> payload offsets of: flag byte, error flag byte, modules, contactors, controller code
+NEW_OFFSETS = {
+    (0x52, 81): (10, None, 68, 69, None),
+    (0x52, 85): (10, None, 72, 73, None),
+    (0x53, 95): (14, 10, 72, 73, 85),
+    (0x53, 99): (14, None, 76, 77, 89),
+}
+
+
+def _with_new_fields(message_type, length, flags=0xa0, error_flags=0xc0, modules=2, contactors=1, code=77):
+    buf = _payload(message_type, length)
+    f, e, m, c, k = NEW_OFFSETS[(message_type, length)]
+    buf[f], buf[m], buf[c] = flags, modules, contactors
+    if e is not None:
+        buf[e] = error_flags
+    if k is not None:
+        buf[k] = code
+    return buf
+
+
+def test_flag_byte_module_and_contactor_counts_decode_on_every_mapped_length():
+    for (message_type, length) in NEW_OFFSETS:
+        out = Gen2.vehicle_state_telemetry_tier(message_type, _with_new_fields(message_type, length))
+        sd = out['structured_data']
+        assert sd['snapshot_flags'] == 0xa0
+        assert sd['bms_modules_on_can'] == 2 and sd['contactors_closed'] == 1
+        assert 'BMS modules/contactors:2/1' in out['conditions']
+
+
+def test_controller_code_decodes_on_0x53_only():
+    for (message_type, length) in NEW_OFFSETS:
+        out = Gen2.vehicle_state_telemetry_tier(message_type, _with_new_fields(message_type, length))
+        sd = out['structured_data']
+        if message_type == 0x53:
+            assert sd['controller_fault_code'] == 77 and 'controller code:77' in out['conditions']
+        else:
+            assert 'controller_fault_code' not in sd
+
+
+def test_error_flag_byte_decodes_on_0x53_at_95_bytes_only():
+    for (message_type, length) in NEW_OFFSETS:
+        sd = Gen2.vehicle_state_telemetry_tier(message_type, _with_new_fields(message_type, length))['structured_data']
+        if (message_type, length) == (0x53, 95):
+            assert sd['snapshot_error_flags'] == 0xc0
+        else:
+            assert 'snapshot_error_flags' not in sd
+
+
+def test_the_rare_93_byte_large_tier_gets_none_of_the_new_fields():
+    sd = Gen2.vehicle_state_telemetry_tier(0x53, _payload(0x53, 93))['structured_data']
+    for name in ('snapshot_flags', 'snapshot_error_flags', 'bms_modules_on_can', 'contactors_closed',
+                 'controller_fault_code'):
+        assert name not in sd
+
+
+def test_new_fields_leave_the_existing_tail_alone():
+    for (message_type, length) in NEW_OFFSETS:
+        before = Gen2.vehicle_state_telemetry_tier(message_type, _payload(message_type, length))['structured_data']
+        after = Gen2.vehicle_state_telemetry_tier(message_type, _with_new_fields(message_type, length))['structured_data']
+        for key in ('distance_km', 'speed_kmh', 'range_km', 'state_of_charge_percent', 'pack_voltage_volts'):
+            assert before.get(key) == after.get(key), (hex(message_type), length, key)

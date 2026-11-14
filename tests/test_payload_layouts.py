@@ -83,7 +83,7 @@ def test_layouts_cover_the_payload_exactly_with_valid_kinds():
     assert Gen2.payload_layout(0x51, 63) is None and Gen2.payload_layout(0x77, 10) is None
 
 
-def test_temp_flags_is_a_declared_field_and_tag_29_stays_unknown():
+def test_temp_flags_and_the_tag_29_flag_byte_are_declared_fields():
     for message_type, tier_lengths in ((0x51, (64, 68)), (0x52, (81, 85)), (0x53, (95, 99))):
         tag = 35 if message_type == 0x51 else Gen2.TELEMETRY_TIERS[message_type][2]
         for length in tier_lengths:
@@ -91,7 +91,8 @@ def test_temp_flags_is_a_declared_field_and_tag_29_stays_unknown():
             assert kinds[tag + 5] == (FIELD, 'temp_flags')
             assert kinds[tag - 25][0] == FIELD
             if message_type in (0x52, 0x53):
-                assert kinds[tag - 29][0] == UNKNOWN          # unexplained, never marked copy or reserved
+                # the datasheet's freeze flags byte (analysis/gen3_mbb_partials.md section 5)
+                assert kinds[tag - 29] == (FIELD, 'snapshot_flags')
 
 
 # ---- the byte-flip check, over one synthetic valid payload per (type, length) ----
