@@ -117,3 +117,29 @@ def test_cell_imbalance_under_a_page_marker_is_withheld():
     sd = _decode_paged(0x4d, payload)['structured_data']
     assert 'cell_imbalance_mv' in sd['corrupted_fields'] and sd['cell_imbalance_mv'] is None
     assert sd['battery_current_amps'] == 12.5
+
+
+# --- discharge current limit ------------------------------------------------------
+
+def test_discharge_limit_is_the_word_before_the_charge_limit():
+    for (message_type, length), at in Gen2.BMS_DISCHARGE_LIMIT_OFFSETS.items():
+        assert Gen2.BMS_CHARGE_LIMIT_OFFSETS[(message_type, length)] == at + 2
+        payload = _payload(message_type, length)
+        struct.pack_into('<HH', payload, at, 1230, 123)
+        out = _decode(message_type, payload)
+        sd = out['structured_data']
+        assert sd['bms_discharge_current_limit_amps'] == 1230 and sd['bms_charge_current_limit_amps'] == 123
+        assert 'ChgLim:123A, DisLim:1230A' in out['conditions']
+        struct.pack_into('<H', payload, at, 0xffff)
+        out = _decode(message_type, payload)
+        assert out['structured_data']['bms_discharge_current_limit_amps'] is None and 'DisLim:n/a' in out['conditions']
+    assert 'bms_discharge_current_limit_amps' not in _decode(0x4b, _payload(0x4b, 45))['structured_data']
+
+
+def test_discharge_limit_under_a_page_marker_is_withheld():
+    payload = _payload(0x4c, 61)
+    struct.pack_into('<HH', payload, 50, 990, 99)
+    payload[48:52] = MARK
+    sd = _decode_paged(0x4c, payload)['structured_data']
+    assert 'bms_discharge_current_limit_amps' in sd['corrupted_fields']
+    assert sd['bms_discharge_current_limit_amps'] is None and sd['bms_charge_current_limit_amps'] == 99

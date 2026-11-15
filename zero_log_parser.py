@@ -3398,6 +3398,13 @@ class Gen2:
     # high bytes were declared reserved before (always 0: the imbalance never
     # reached 256 mV in a clean record).
     BMS_IMBALANCE_OFFSETS = {(0x4c, 61): 59, (0x4c, 63): 61, (0x4d, 69): 63, (0x4d, 71): 65}
+    # (message_type, payload length) -> u16 LE discharge current limit, A (the
+    # datasheet's max_disch_amps, the word before the charge limit). Evidence
+    # (analysis/gen3_bms_d4.md section 5.3): discharge current at or below it
+    # in 4,626 of 4,630 clean discharging records; it falls with cold cells
+    # (MY19 BMS median 1,280 A at 30 C and up, 184 A at -5 C) and low SOC
+    # (48 A below 10%), and at rest it is ten times the charge limit.
+    BMS_DISCHARGE_LIMIT_OFFSETS = {(0x4c, 61): 50, (0x4c, 63): 52, (0x4d, 69): 54, (0x4d, 71): 56}
 
     @classmethod
     def bms_telemetry_status_fields(cls, message_type, x):
@@ -3488,6 +3495,10 @@ class Gen2:
             limit = BinaryTools.unpack('uint16', x, cls.BMS_CHARGE_LIMIT_OFFSETS[key])
             data['bms_charge_current_limit_amps'] = None if limit in cls.BMS_U16_SENTINELS else limit
 
+        if key in cls.BMS_DISCHARGE_LIMIT_OFFSETS:
+            limit = BinaryTools.unpack('uint16', x, cls.BMS_DISCHARGE_LIMIT_OFFSETS[key])
+            data['bms_discharge_current_limit_amps'] = None if limit in cls.BMS_U16_SENTINELS else limit
+
         if key in cls.BMS_IMBALANCE_OFFSETS:
             at = cls.BMS_IMBALANCE_OFFSETS[key]
             data['cell_imbalance_mv'] = None if BinaryTools.unpack('uint16', x, at) in cls.BMS_U16_SENTINELS \
@@ -3506,6 +3517,9 @@ class Gen2:
         if 'bms_charge_current_limit_amps' in data:
             v = data['bms_charge_current_limit_amps']
             conditions.append(f"ChgLim:{'n/a' if v is None else v}A")
+        if 'bms_discharge_current_limit_amps' in data:
+            v = data['bms_discharge_current_limit_amps']
+            conditions.append(f"DisLim:{'n/a' if v is None else v}A")
         if 'cell_imbalance_mv' in data:
             v = data['cell_imbalance_mv']
             conditions.append(f"Imb:{'n/a' if v is None else v}mV")
@@ -3943,7 +3957,8 @@ class Gen2:
             (46, 47, 'reserved', 'constant 0x00 in all 2638 marker-free accepted entries'),
             (47, 48, 'field', 'cell_temperature_coldest_c'),
             (48, 49, 'field', 'cell_temperature_hottest_c'),
-            (49, 52, 'unknown', 'not understood yet'),
+            (49, 50, 'unknown', 'not understood yet'),
+            (50, 52, 'field', 'bms_discharge_current_limit_amps'),
             (52, 54, 'field', 'bms_charge_current_limit_amps'),
             (54, 57, 'unknown', 'not understood yet'),
             (57, 58, 'reserved', 'constant 0x00 in all 2448 of 4866 entries that no page marker (whole, or its first 2-3 bytes at the end of the payload) or 0xff erase fill touches; every other value is such damage'),
@@ -3972,7 +3987,8 @@ class Gen2:
             (48, 49, 'field', 'highest_cell_index'),
             (49, 50, 'field', 'cell_temperature_coldest_c'),
             (50, 51, 'field', 'cell_temperature_hottest_c'),
-            (51, 54, 'unknown', 'not understood yet'),
+            (51, 52, 'unknown', 'not understood yet'),
+            (52, 54, 'field', 'bms_discharge_current_limit_amps'),
             (54, 56, 'field', 'bms_charge_current_limit_amps'),
             (56, 59, 'unknown', 'not understood yet'),
             (59, 60, 'reserved', 'constant 0x00 in all 2638 marker-free accepted entries'),
@@ -4052,7 +4068,8 @@ class Gen2:
             (50, 51, 'reserved', 'constant 0x00 in all 9334 marker-free accepted entries'),
             (51, 52, 'field', 'cell_temperature_coldest_c'),
             (52, 53, 'field', 'cell_temperature_hottest_c'),
-            (53, 56, 'unknown', 'not understood yet'),
+            (53, 54, 'unknown', 'not understood yet'),
+            (54, 56, 'field', 'bms_discharge_current_limit_amps'),
             (56, 58, 'field', 'bms_charge_current_limit_amps'),
             (58, 61, 'field', 'full_charge_capacity_ah'),
             (61, 62, 'reserved', 'constant 0x00 in all 9334 marker-free accepted entries'),
@@ -4087,7 +4104,8 @@ class Gen2:
             (52, 53, 'field', 'highest_cell_index'),
             (53, 54, 'field', 'cell_temperature_coldest_c'),
             (54, 55, 'field', 'cell_temperature_hottest_c'),
-            (55, 58, 'unknown', 'not understood yet'),
+            (55, 56, 'unknown', 'not understood yet'),
+            (56, 58, 'field', 'bms_discharge_current_limit_amps'),
             (58, 60, 'field', 'bms_charge_current_limit_amps'),
             (60, 63, 'field', 'full_charge_capacity_ah'),
             (63, 64, 'reserved', 'constant 0x00 in all 6421 marker-free accepted entries'),
