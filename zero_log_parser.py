@@ -3390,6 +3390,14 @@ class Gen2:
     # kept as read (mostly with the open-circuit voltage 0: inferred "not
     # computed").
     BMS_CELL_INDEX_OFFSETS = {(0x4b, 45): 43, (0x4c, 63): 47, (0x4d, 71): 51}
+    # (message_type, payload length) -> s16 LE cell imbalance, mV (the
+    # datasheet's cell_imbalance_mv, highest minus lowest cell). Evidence
+    # (analysis/gen3_bms_d4.md section 5.2): equal to the decoded high cell
+    # minus the decoded low cell in 21,605 of 21,655 clean records, 99.6% or
+    # more in every layout and firmware revision. The 0x4C/63 and 0x4D/71
+    # high bytes were declared reserved before (always 0: the imbalance never
+    # reached 256 mV in a clean record).
+    BMS_IMBALANCE_OFFSETS = {(0x4c, 61): 59, (0x4c, 63): 61, (0x4d, 69): 63, (0x4d, 71): 65}
 
     @classmethod
     def bms_telemetry_status_fields(cls, message_type, x):
@@ -3480,6 +3488,11 @@ class Gen2:
             limit = BinaryTools.unpack('uint16', x, cls.BMS_CHARGE_LIMIT_OFFSETS[key])
             data['bms_charge_current_limit_amps'] = None if limit in cls.BMS_U16_SENTINELS else limit
 
+        if key in cls.BMS_IMBALANCE_OFFSETS:
+            at = cls.BMS_IMBALANCE_OFFSETS[key]
+            data['cell_imbalance_mv'] = None if BinaryTools.unpack('uint16', x, at) in cls.BMS_U16_SENTINELS \
+                else BinaryTools.unpack('int16', x, at)
+
         for name, text in (('bms_temperature_c', 'Tbms'), ('cell_temperature_hottest_c', 'Tcellmax'),
                            ('cell_temperature_coldest_c', 'Tcellmin')):
             if name in data:
@@ -3493,6 +3506,9 @@ class Gen2:
         if 'bms_charge_current_limit_amps' in data:
             v = data['bms_charge_current_limit_amps']
             conditions.append(f"ChgLim:{'n/a' if v is None else v}A")
+        if 'cell_imbalance_mv' in data:
+            v = data['cell_imbalance_mv']
+            conditions.append(f"Imb:{'n/a' if v is None else v}mV")
         if data.get('bms_report_mode') is not None:
             conditions.append(f"Mode:{data['bms_report_mode']}")
         return data, ', '.join(conditions)
@@ -3931,7 +3947,8 @@ class Gen2:
             (52, 54, 'field', 'bms_charge_current_limit_amps'),
             (54, 57, 'unknown', 'not understood yet'),
             (57, 58, 'reserved', 'constant 0x00 in all 2448 of 4866 entries that no page marker (whole, or its first 2-3 bytes at the end of the payload) or 0xff erase fill touches; every other value is such damage'),
-            (58, 61, 'unknown', 'not understood yet'),
+            (58, 59, 'unknown', 'not understood yet'),
+            (59, 61, 'field', 'cell_imbalance_mv'),
         ),
         (0x4c, 63): (
             (0, 4, 'field', 'subsecond_us'),
@@ -3959,8 +3976,8 @@ class Gen2:
             (54, 56, 'field', 'bms_charge_current_limit_amps'),
             (56, 59, 'unknown', 'not understood yet'),
             (59, 60, 'reserved', 'constant 0x00 in all 2638 marker-free accepted entries'),
-            (60, 62, 'unknown', 'not understood yet'),
-            (62, 63, 'reserved', 'constant 0x00 in all 2476 of 5081 entries that no page marker (whole, or its first 2-3 bytes at the end of the payload) or 0xff erase fill touches; every other value is such damage'),
+            (60, 61, 'unknown', 'not understood yet'),
+            (61, 63, 'field', 'cell_imbalance_mv'),
         ),
         (0x4c, 77): (
             (0, 4, 'field', 'subsecond_us'),
@@ -4039,7 +4056,8 @@ class Gen2:
             (56, 58, 'field', 'bms_charge_current_limit_amps'),
             (58, 61, 'field', 'full_charge_capacity_ah'),
             (61, 62, 'reserved', 'constant 0x00 in all 9334 marker-free accepted entries'),
-            (62, 65, 'unknown', 'not understood yet'),
+            (62, 63, 'unknown', 'not understood yet'),
+            (63, 65, 'field', 'cell_imbalance_mv'),
             (65, 68, 'field', 'full_charge_capacity_twin_ah'),
             (68, 69, 'reserved', 'constant 0x00 in all 9214 of 17911 entries that no page marker (whole, or its first 2-3 bytes at the end of the payload) or 0xff erase fill touches; every other value is such damage'),
         ),
@@ -4073,7 +4091,8 @@ class Gen2:
             (58, 60, 'field', 'bms_charge_current_limit_amps'),
             (60, 63, 'field', 'full_charge_capacity_ah'),
             (63, 64, 'reserved', 'constant 0x00 in all 6421 marker-free accepted entries'),
-            (64, 67, 'unknown', 'not understood yet'),
+            (64, 65, 'unknown', 'not understood yet'),
+            (65, 67, 'field', 'cell_imbalance_mv'),
             (67, 70, 'field', 'full_charge_capacity_twin_ah'),
             (70, 71, 'reserved', 'constant 0x00 in all 5958 of 14205 entries that no page marker (whole, or its first 2-3 bytes at the end of the payload) or 0xff erase fill touches; every other value is such damage'),
         ),

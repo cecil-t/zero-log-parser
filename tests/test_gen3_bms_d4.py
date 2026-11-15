@@ -90,3 +90,30 @@ def test_cell_index_under_a_page_marker_is_withheld():
     assert 'lowest_cell_index' in sd['corrupted_fields'] and 'highest_cell_index' in sd['corrupted_fields']
     assert sd['lowest_cell_index'] is None and sd['highest_cell_index'] is None
     assert sd['state_of_charge_percent'] == 61 and sd['voltage_low_cell_volts'] == 3.81
+
+
+# --- cell imbalance -------------------------------------------------------------
+
+def test_cell_imbalance_s16_at_the_variant_offsets():
+    assert Gen2.BMS_IMBALANCE_OFFSETS == {(0x4c, 61): 59, (0x4c, 63): 61, (0x4d, 69): 63, (0x4d, 71): 65}
+    for (message_type, length), at in Gen2.BMS_IMBALANCE_OFFSETS.items():
+        payload = _payload(message_type, length)
+        struct.pack_into('<h', payload, at, 32)
+        out = _decode(message_type, payload)
+        assert out['structured_data']['cell_imbalance_mv'] == 32 and 'Imb:32mV' in out['conditions']
+        struct.pack_into('<h', payload, at, -3)
+        assert _decode(message_type, payload)['structured_data']['cell_imbalance_mv'] == -3
+        struct.pack_into('<H', payload, at, 0xf0f0)
+        out = _decode(message_type, payload)
+        assert out['structured_data']['cell_imbalance_mv'] is None and 'Imb:n/a' in out['conditions']
+    for length in (43, 45):
+        assert 'cell_imbalance_mv' not in _decode(0x4b, _payload(0x4b, length))['structured_data']
+
+
+def test_cell_imbalance_under_a_page_marker_is_withheld():
+    payload = _payload(0x4d, 71)
+    struct.pack_into('<h', payload, 65, 37)
+    payload[63:67] = MARK
+    sd = _decode_paged(0x4d, payload)['structured_data']
+    assert 'cell_imbalance_mv' in sd['corrupted_fields'] and sd['cell_imbalance_mv'] is None
+    assert sd['battery_current_amps'] == 12.5
