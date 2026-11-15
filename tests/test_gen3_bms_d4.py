@@ -190,3 +190,32 @@ def test_0x4d_byte_19_under_a_page_marker_is_withheld():
     payload[16:20] = MARK
     sd = _decode_paged(0x4d, payload)['structured_data']
     assert 'pack_fault_flags_a' in sd['corrupted_fields'] and sd['pack_fault_flags_a'] is None
+
+
+# --- reduced-reporting flag in 0x4B/39 ---------------------------------------------------------
+
+def _short_payload():
+    """A 39-byte 0x4B record that passes the short-variant cell-block check."""
+    return _payload(0x4b, 39)
+
+
+def test_reduced_reporting_byte_on_the_39_byte_record_only():
+    payload = _short_payload()
+    payload[6], payload[10] = 1, 0x10
+    out = _decode(0x4b, payload)
+    assert out['event'] == 'BMS Cell Telemetry'
+    assert out['structured_data']['bms_reduced_reporting'] == 1
+    payload[6], payload[10] = 0, 0
+    assert _decode(0x4b, payload)['structured_data']['bms_reduced_reporting'] == 0
+    payload[6] = 0xff
+    assert _decode(0x4b, payload)['structured_data']['bms_reduced_reporting'] is None
+    for length in (43, 45):
+        assert 'bms_reduced_reporting' not in _decode(0x4b, _payload(0x4b, length))['structured_data']
+
+
+def test_reduced_reporting_byte_under_a_page_marker_is_withheld():
+    payload = _short_payload()
+    payload[6] = 1
+    payload[6:10] = MARK
+    sd = _decode_paged(0x4b, payload)['structured_data']
+    assert 'bms_reduced_reporting' in sd['corrupted_fields'] and sd['bms_reduced_reporting'] is None

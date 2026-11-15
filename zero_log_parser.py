@@ -3478,6 +3478,15 @@ class Gen2:
             # INVALID/NO PACK TYPE, 0x60 at payload 30 with a set SELF TEST).
             data['pack_fault_flags_a'] = byte_at(11)
             data['pack_fault_flags_b'] = byte_at(30)
+            if key == (0x4b, 39):
+                # The datasheet's entry_error_flags byte 0, which the 2019-20
+                # SR/F firmware (MY19 BMS 8, 9, 11) sets to 1 in a reduced-
+                # reporting state, with sensor_read_failures (our payload 10,
+                # bms_sleep_indicator) 0x10 and SOC and current 0. Evidence
+                # (analysis/gen3_bms_d4.md section 5.6): 1 exactly when payload
+                # 10 is 0x10 in 981 of 981 records, SOC and current 0 in 296 of
+                # the 303 with 1. Kept as read.
+                data['bms_reduced_reporting'] = byte_at(6)
         elif key in ((0x4d, 69), (0x4d, 71)):
             # The same byte as 0x4B payload 11: the datasheet's
             # sensor_read_failures byte 1, where 4 (bit 10) is "pack voltage
@@ -3851,7 +3860,7 @@ class Gen2:
             (0, 4, 'field', 'subsecond_us'),
             (4, 5, 'field', 'sequence'),
             (5, 6, 'field', 'marker'),
-            (6, 7, 'unknown', 'not understood yet (0x00 in 69% of entries, unlike the 43-byte record)'),
+            (6, 7, 'field', 'bms_reduced_reporting'),
             (7, 10, 'reserved', 'constant 0x00 in all 981 accepted entries'),
             (10, 11, 'field', 'bms_sleep_indicator'),
             (11, 12, 'field', 'pack_fault_flags_a'),
