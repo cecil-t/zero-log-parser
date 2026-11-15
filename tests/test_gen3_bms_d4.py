@@ -166,3 +166,27 @@ def test_0x4c_capacity_under_a_page_marker_is_withheld():
     payload[55:59] = MARK
     sd = _decode_paged(0x4c, payload)['structured_data']
     assert 'full_charge_capacity_ah' in sd['corrupted_fields'] and sd['full_charge_capacity_ah'] is None
+
+
+# --- pack voltage unreadable flag in 0x4D --------------------------------------------------
+
+def test_0x4d_byte_19_is_the_0x4b_byte_11_flag():
+    for length in (69, 71):
+        payload = _payload(0x4d, length)
+        payload[19] = 4
+        assert _decode(0x4d, payload)['structured_data']['pack_fault_flags_a'] == 4
+        payload[19] = 0
+        assert _decode(0x4d, payload)['structured_data']['pack_fault_flags_a'] == 0
+        payload[19] = 0xf0
+        assert _decode(0x4d, payload)['structured_data']['pack_fault_flags_a'] is None
+    payload = _payload(0x4b, 43)
+    payload[11] = 4
+    assert _decode(0x4b, payload)['structured_data']['pack_fault_flags_a'] == 4
+
+
+def test_0x4d_byte_19_under_a_page_marker_is_withheld():
+    payload = _payload(0x4d, 69)
+    payload[19] = 4
+    payload[16:20] = MARK
+    sd = _decode_paged(0x4d, payload)['structured_data']
+    assert 'pack_fault_flags_a' in sd['corrupted_fields'] and sd['pack_fault_flags_a'] is None

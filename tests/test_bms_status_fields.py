@@ -134,9 +134,11 @@ def test_fault_flag_bytes_on_0x4b_only():
     assert sd['pack_fault_flags_a'] == 4 and sd['pack_fault_flags_b'] == 0x60
     sd = _decode(0x4b, _payload(0x4b, 43, p11=0xf0, p30=0xff))['structured_data']
     assert sd['pack_fault_flags_a'] is None and sd['pack_fault_flags_b'] is None
-    for message_type, length in ((0x4c, 61), (0x4d, 69)):
+    for message_type, length in ((0x4c, 61), (0x4c, 63)):
         sd = _decode(message_type, _payload(message_type, length))['structured_data']
         assert 'pack_fault_flags_a' not in sd
+    for message_type, length in ((0x4d, 69), (0x4d, 71)):  # flags_a only (tests/test_gen3_bms_d4.py)
+        assert 'pack_fault_flags_b' not in _decode(message_type, _payload(message_type, length))['structured_data']
 
 
 def test_conditions_gain_a_status_fragment_and_cell_voltage_fields_are_unchanged():

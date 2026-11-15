@@ -3478,6 +3478,13 @@ class Gen2:
             # INVALID/NO PACK TYPE, 0x60 at payload 30 with a set SELF TEST).
             data['pack_fault_flags_a'] = byte_at(11)
             data['pack_fault_flags_b'] = byte_at(30)
+        elif key in ((0x4d, 69), (0x4d, 71)):
+            # The same byte as 0x4B payload 11: the datasheet's
+            # sensor_read_failures byte 1, where 4 (bit 10) is "pack voltage
+            # unreadable". Evidence (analysis/gen3_bms_d4.md section 5.5):
+            # across 0x4B and 0x4D, value 4 in 238 clean records, all with the
+            # pack voltage 0; clear in 123,836, of which 15 read 0.
+            data['pack_fault_flags_a'] = byte_at(19)
 
         if key in cls.BMS_CELL_INDEX_OFFSETS:
             at = cls.BMS_CELL_INDEX_OFFSETS[key]
@@ -4057,7 +4064,7 @@ class Gen2:
             (15, 16, 'unknown', 'not understood yet'),
             (16, 18, 'reserved', 'constant 0x00 in all 9334 marker-free accepted entries'),
             (18, 19, 'field', 'bms_sleep_indicator'),
-            (19, 20, 'unknown', 'not understood yet'),
+            (19, 20, 'field', 'pack_fault_flags_a'),
             (20, 22, 'reserved', 'constant 0x00 in all 9334 marker-free accepted entries'),
             (22, 24, 'field', 'voltage_low_cell_volts'),
             (24, 26, 'field', 'voltage_unloaded_cell_volts'),
@@ -4091,7 +4098,7 @@ class Gen2:
             (15, 16, 'unknown', 'not understood yet'),
             (16, 18, 'reserved', 'constant 0x00 in all 6421 marker-free accepted entries'),
             (18, 19, 'field', 'bms_sleep_indicator'),
-            (19, 20, 'unknown', 'not understood yet'),
+            (19, 20, 'field', 'pack_fault_flags_a'),
             (20, 22, 'reserved', 'constant 0x00 in all 6421 marker-free accepted entries'),
             (22, 24, 'field', 'voltage_low_cell_volts'),
             (24, 26, 'field', 'voltage_unloaded_cell_volts'),
