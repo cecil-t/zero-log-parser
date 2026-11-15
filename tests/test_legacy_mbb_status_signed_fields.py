@@ -81,3 +81,41 @@ def test_disarmed_other_fields_unchanged():
     assert sd['motor_rpm'] == 0
     assert sd['ambient_temp_celsius'] == 15
     assert sd['odometer_km'] == 12345
+
+
+def _charging_payload(pack_hi=20, pack_lo=18, soc=64, mv=104500, batt_amps=-12, mods=0x03, ambient=15):
+    """15-byte Charging payload at the firmware's offsets."""
+    p = bytearray(15)
+    struct.pack_into('<b', p, 0x00, pack_hi)
+    struct.pack_into('<b', p, 0x01, pack_lo)
+    struct.pack_into('<H', p, 0x02, soc)
+    struct.pack_into('<I', p, 0x04, mv)
+    struct.pack_into('<h', p, 0x08, batt_amps)
+    struct.pack_into('<B', p, 0x0c, mods)
+    struct.pack_into('<h', p, 0x0d, ambient)
+    return p
+
+
+def test_pack_temps_below_freezing():
+    # -4 C high, -8 C low (bytes fc f8): the uint8 read showed 252 C and 248 C.
+    for message_type in (0x2c, 0x3c):
+        sd = _decode(message_type, _status_payload(pack_hi=-4, pack_lo=-8))['structured_data']
+        assert (sd['pack_temp_high_celsius'], sd['pack_temp_low_celsius']) == (-4, -8)
+    sd = _decode(0x2d, _charging_payload(pack_hi=-4, pack_lo=-8))['structured_data']
+    assert (sd['pack_temp_high_celsius'], sd['pack_temp_low_celsius']) == (-4, -8)
+
+
+def test_pack_temp_invalid_thermistor_value():
+    # -100 C (byte 9c), the firmware's invalid-thermistor value, kept as-is (was 156 C).
+    out = _decode(0x3c, _status_payload(pack_hi=-100, pack_lo=-100))
+    assert out['structured_data']['pack_temp_high_celsius'] == -100
+    assert 'PackTemp: h -100C, l -100C' in out['conditions']
+
+
+def test_pack_temps_above_freezing_unchanged():
+    for message_type in (0x2c, 0x3c):
+        sd = _decode(message_type, _status_payload(pack_hi=35, pack_lo=31))['structured_data']
+        assert (sd['pack_temp_high_celsius'], sd['pack_temp_low_celsius']) == (35, 31)
+    sd = _decode(0x2d, _charging_payload(pack_hi=35, pack_lo=31))['structured_data']
+    assert (sd['pack_temp_high_celsius'], sd['pack_temp_low_celsius']) == (35, 31)
+    assert sd['battery_current_amps'] == -12

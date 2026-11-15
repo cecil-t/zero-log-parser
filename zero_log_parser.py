@@ -2529,8 +2529,12 @@ class Gen2:
         }
 
         # Extract raw binary data once into structured format
-        pack_temp_hi = BinaryTools.unpack('uint8', x, 0x0)
-        pack_temp_low = BinaryTools.unpack('uint8', x, 0x1)
+        # Pack temperatures are signed bytes (the firmware renderer reads
+        # them with ldrsb in Riding, Charging and Disarmed alike): below
+        # freezing, and the -100 C invalid-thermistor value, read as uint8
+        # gave 156..255 C. analysis/legacy_mbb_disarmed_current.md.
+        pack_temp_hi = BinaryTools.unpack('int8', x, 0x0)
+        pack_temp_low = BinaryTools.unpack('int8', x, 0x1)
         soc = BinaryTools.unpack('uint16', x, 0x2)
         pack_voltage = convert_mv_to_v(BinaryTools.unpack('uint32', x, 0x4))
         motor_temp = BinaryTools.unpack('int16', x, 0x8)
@@ -2593,8 +2597,12 @@ class Gen2:
     @classmethod
     def charging_status(cls, x):
         # Extract raw binary data once into structured format
-        pack_temp_hi = BinaryTools.unpack('uint8', x, 0x00)
-        pack_temp_low = BinaryTools.unpack('uint8', x, 0x01)
+        # Pack temperatures are signed bytes (the firmware renderer reads
+        # them with ldrsb in Riding, Charging and Disarmed alike): below
+        # freezing, and the -100 C invalid-thermistor value, read as uint8
+        # gave 156..255 C. analysis/legacy_mbb_disarmed_current.md.
+        pack_temp_hi = BinaryTools.unpack('int8', x, 0x00)
+        pack_temp_low = BinaryTools.unpack('int8', x, 0x01)
         soc = BinaryTools.unpack('uint16', x, 0x02)
         pack_voltage = convert_mv_to_v(BinaryTools.unpack('uint32', x, 0x4))
         battery_current = BinaryTools.unpack('int8', x, 0x08)
@@ -4778,8 +4786,12 @@ class Gen2:
     @classmethod
     def disarmed_status(cls, x):
         # Extract raw binary data once into structured format
-        pack_temp_hi = BinaryTools.unpack('uint8', x, 0x0)
-        pack_temp_low = BinaryTools.unpack('uint8', x, 0x1)
+        # Pack temperatures are signed bytes (the firmware renderer reads
+        # them with ldrsb in Riding, Charging and Disarmed alike): below
+        # freezing, and the -100 C invalid-thermistor value, read as uint8
+        # gave 156..255 C. analysis/legacy_mbb_disarmed_current.md.
+        pack_temp_hi = BinaryTools.unpack('int8', x, 0x0)
+        pack_temp_low = BinaryTools.unpack('int8', x, 0x1)
         soc = BinaryTools.unpack('uint16', x, 0x2)
         pack_voltage = convert_mv_to_v(BinaryTools.unpack('uint32', x, 0x4))
         motor_temp = BinaryTools.unpack('int16', x, 0x8)
