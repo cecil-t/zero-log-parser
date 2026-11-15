@@ -4785,7 +4785,12 @@ class Gen2:
         motor_temp = BinaryTools.unpack('int16', x, 0x8)
         controller_temp = BinaryTools.unpack('int16', x, 0xa)
         rpm = BinaryTools.unpack('uint16', x, 0xc)
-        battery_current = BinaryTools.unpack('uint8', x, 0x10)
+        # Signed 16-bit, the same field as run_status(): the MBB firmware
+        # renders Disarmed (0x3c) and Riding (0x2c) with one template and
+        # reads offset 0x10 as a sign-extended halfword for both. Read as
+        # uint8 it turned every charging current of -1..-128 A into
+        # 255..128 A. Evidence: analysis/legacy_mbb_disarmed_current.md.
+        battery_current = BinaryTools.unpack('int16', x, 0x10)
         mods = BinaryTools.unpack('uint8', x, 0x12)
         motor_current = BinaryTools.unpack('int8', x, 0x13)
         ambient_temp = BinaryTools.unpack('int16', x, 0x15)
