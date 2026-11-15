@@ -98,7 +98,10 @@ def test_cell_temperatures_at_the_variant_offsets_and_not_on_0x4b():
 
 
 def test_full_charge_capacity_register_and_twin_on_0x4d():
-    for (message_type, length), (a, b) in Gen2.BMS_CAPACITY_OFFSETS.items():
+    for (message_type, length), offsets in Gen2.BMS_CAPACITY_OFFSETS.items():
+        if len(offsets) != 2:
+            continue  # 0x4C has the register only (tests/test_gen3_bms_d4.py)
+        a, b = offsets
         payload = bytearray([1]) * length
         struct.pack_into('<I', payload, 0, 123000)
         payload[a:a + 3] = (140344).to_bytes(3, 'little')
@@ -110,7 +113,7 @@ def test_full_charge_capacity_register_and_twin_on_0x4d():
         payload[b:b + 3] = b'\xff\xff\xff'
         sd = _decode(message_type, payload)['structured_data']
         assert sd['full_charge_capacity_ah'] is None and sd['full_charge_capacity_twin_ah'] is None
-    assert set(Gen2.BMS_CAPACITY_OFFSETS) == {(0x4d, 69), (0x4d, 71)}
+    assert {k for k, v in Gen2.BMS_CAPACITY_OFFSETS.items() if len(v) == 2} == {(0x4d, 69), (0x4d, 71)}
     sd = _decode(0x4b, _payload(0x4b, 45))['structured_data']
     assert 'full_charge_capacity_ah' not in sd
 

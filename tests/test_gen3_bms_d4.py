@@ -143,3 +143,26 @@ def test_discharge_limit_under_a_page_marker_is_withheld():
     sd = _decode_paged(0x4c, payload)['structured_data']
     assert 'bms_discharge_current_limit_amps' in sd['corrupted_fields']
     assert sd['bms_discharge_current_limit_amps'] is None and sd['bms_charge_current_limit_amps'] == 99
+
+
+# --- adjusted capacity in 0x4C ----------------------------------------------------------
+
+def test_0x4c_capacity_register_without_a_twin():
+    for (message_type, length), at in (((0x4c, 61), 54), ((0x4c, 63), 56)):
+        assert Gen2.BMS_CAPACITY_OFFSETS[(message_type, length)] == (at,)
+        payload = _payload(message_type, length)
+        payload[at:at + 3] = (138_512).to_bytes(3, 'little')
+        out = _decode(message_type, payload)
+        sd = out['structured_data']
+        assert sd['full_charge_capacity_ah'] == 138.512 and 'full_charge_capacity_twin_ah' not in sd
+        assert 'Cap:138.512Ah' in out['conditions']
+        payload[at:at + 3] = b'\xff\xff\xff'
+        assert _decode(message_type, payload)['structured_data']['full_charge_capacity_ah'] is None
+
+
+def test_0x4c_capacity_under_a_page_marker_is_withheld():
+    payload = _payload(0x4c, 63)
+    payload[56:59] = (141_002).to_bytes(3, 'little')
+    payload[55:59] = MARK
+    sd = _decode_paged(0x4c, payload)['structured_data']
+    assert 'full_charge_capacity_ah' in sd['corrupted_fields'] and sd['full_charge_capacity_ah'] is None

@@ -3373,7 +3373,12 @@ class Gen2:
         (0x4d, 69): (51, 52), (0x4d, 71): (53, 54),
     }
     # (message_type, payload length) -> (register, twin) u24 LE, mAh, absolute offsets.
-    BMS_CAPACITY_OFFSETS = {(0x4d, 69): (58, 65), (0x4d, 71): (60, 67)}
+    # 0x4C has the register only (the datasheet's adj_pack_cap_mah; its high
+    # byte is declared reserved, as in 0x4D). Evidence for 0x4C (analysis/
+    # gen3_bms_d4.md section 5.4): within 500 mAh of the nearest 0x4D register
+    # in 5,095 of 5,193 records, and of the BMS's own CapEst text line in 374
+    # of 374.
+    BMS_CAPACITY_OFFSETS = {(0x4c, 61): (54,), (0x4c, 63): (56,), (0x4d, 69): (58, 65), (0x4d, 71): (60, 67)}
     # (message_type, payload length) -> u16 LE charge current limit, A, absolute offset.
     BMS_CHARGE_LIMIT_OFFSETS = {
         (0x4c, 61): 52, (0x4c, 63): 54, (0x4d, 69): 56, (0x4d, 71): 58,
@@ -3960,7 +3965,7 @@ class Gen2:
             (49, 50, 'unknown', 'not understood yet'),
             (50, 52, 'field', 'bms_discharge_current_limit_amps'),
             (52, 54, 'field', 'bms_charge_current_limit_amps'),
-            (54, 57, 'unknown', 'not understood yet'),
+            (54, 57, 'field', 'full_charge_capacity_ah'),
             (57, 58, 'reserved', 'constant 0x00 in all 2448 of 4866 entries that no page marker (whole, or its first 2-3 bytes at the end of the payload) or 0xff erase fill touches; every other value is such damage'),
             (58, 59, 'unknown', 'not understood yet'),
             (59, 61, 'field', 'cell_imbalance_mv'),
@@ -3990,7 +3995,7 @@ class Gen2:
             (51, 52, 'unknown', 'not understood yet'),
             (52, 54, 'field', 'bms_discharge_current_limit_amps'),
             (54, 56, 'field', 'bms_charge_current_limit_amps'),
-            (56, 59, 'unknown', 'not understood yet'),
+            (56, 59, 'field', 'full_charge_capacity_ah'),
             (59, 60, 'reserved', 'constant 0x00 in all 2638 marker-free accepted entries'),
             (60, 61, 'unknown', 'not understood yet'),
             (61, 63, 'field', 'cell_imbalance_mv'),
