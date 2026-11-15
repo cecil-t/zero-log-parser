@@ -3379,6 +3379,17 @@ class Gen2:
         (0x4c, 61): 52, (0x4c, 63): 54, (0x4d, 69): 56, (0x4d, 71): 58,
     }
     BMS_U16_SENTINELS = frozenset([0xf0f0, 0xf0ff, 0xfff0, 0xffff])
+    # (message_type, payload length) -> offset of the lowest cell index; the
+    # highest cell index is the next byte. Long variants only (the datasheet's
+    # lowest_cell_index / highest_cell_index, 0-27, 0xFF unavailable). Evidence
+    # (analysis/gen3_bms_d4.md section 5.1): 0-27 in all 55,153 clean records
+    # of 28-cell packs, distinct outside 0/0 in 54,883 of 54,892, the same
+    # dominant low cell across files of one BMS in 110 of 113 file pairs (6.1%
+    # for different BMSs), and equal to the indices in the BMS's own 0x79/0x7A
+    # cell-imbalance and 0x84 records wherever both are computed. Both 0 is
+    # kept as read (mostly with the open-circuit voltage 0: inferred "not
+    # computed").
+    BMS_CELL_INDEX_OFFSETS = {(0x4b, 45): 43, (0x4c, 63): 47, (0x4d, 71): 51}
 
     @classmethod
     def bms_telemetry_status_fields(cls, message_type, x):
@@ -3448,6 +3459,11 @@ class Gen2:
             data['pack_fault_flags_a'] = byte_at(11)
             data['pack_fault_flags_b'] = byte_at(30)
 
+        if key in cls.BMS_CELL_INDEX_OFFSETS:
+            at = cls.BMS_CELL_INDEX_OFFSETS[key]
+            data['lowest_cell_index'] = byte_at(at)
+            data['highest_cell_index'] = byte_at(at + 1)
+
         if key in cls.BMS_CELL_TEMPERATURE_OFFSETS:
             coldest_at, hottest_at = cls.BMS_CELL_TEMPERATURE_OFFSETS[key]
             data['cell_temperature_coldest_c'] = byte_at(coldest_at)
@@ -3468,6 +3484,9 @@ class Gen2:
                            ('cell_temperature_coldest_c', 'Tcellmin')):
             if name in data:
                 conditions.append(f"{text}:{'n/a' if data[name] is None else data[name]}C")
+        if 'lowest_cell_index' in data:
+            conditions.append('Cells:low#{} high#{}'.format(
+                *('n/a' if data[k] is None else data[k] for k in ('lowest_cell_index', 'highest_cell_index'))))
         if 'full_charge_capacity_ah' in data:
             v = data['full_charge_capacity_ah']
             conditions.append(f"Cap:{'n/a' if v is None else format(v, '.3f')}Ah")
@@ -3847,7 +3866,8 @@ class Gen2:
             (38, 39, 'field', 'bms_report_mode'),
             (39, 42, 'field', 'pack_voltage_volts'),
             (42, 43, 'reserved', 'constant 0x00 in all 38405 marker-free accepted entries'),
-            (43, 45, 'unknown', 'two bytes, each 0 to 27 (a 28-cell range), identity not established'),
+            (43, 44, 'field', 'lowest_cell_index'),
+            (44, 45, 'field', 'highest_cell_index'),
         ),
         (0x4b, 46): (
             (0, 4, 'field', 'subsecond_us'),
@@ -3931,7 +3951,8 @@ class Gen2:
             (42, 43, 'field', 'bms_report_mode'),
             (43, 46, 'field', 'pack_voltage_volts'),
             (46, 47, 'reserved', 'constant 0x00 in all 2638 marker-free accepted entries'),
-            (47, 49, 'unknown', 'two bytes, each 0 to 27 (a 28-cell range), identity not established'),
+            (47, 48, 'field', 'lowest_cell_index'),
+            (48, 49, 'field', 'highest_cell_index'),
             (49, 50, 'field', 'cell_temperature_coldest_c'),
             (50, 51, 'field', 'cell_temperature_hottest_c'),
             (51, 54, 'unknown', 'not understood yet'),
@@ -4044,7 +4065,8 @@ class Gen2:
             (46, 47, 'field', 'bms_report_mode'),
             (47, 50, 'field', 'pack_voltage_volts'),
             (50, 51, 'reserved', 'constant 0x00 in all 6421 marker-free accepted entries'),
-            (51, 53, 'unknown', 'two bytes, each 0 to 27 (a 28-cell range), identity not established'),
+            (51, 52, 'field', 'lowest_cell_index'),
+            (52, 53, 'field', 'highest_cell_index'),
             (53, 54, 'field', 'cell_temperature_coldest_c'),
             (54, 55, 'field', 'cell_temperature_hottest_c'),
             (55, 58, 'unknown', 'not understood yet'),
