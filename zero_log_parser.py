@@ -2612,6 +2612,11 @@ class Gen2:
         battery_current = BinaryTools.unpack('int8', x, 0x08)
         mods = BinaryTools.unpack('uint8', x, 0x0c)
         ambient_temp = BinaryTools.unpack('int8', x, 0x0d)
+        # MbbChgEn: the firmware renderer prints Yes when byte 0x0a is non-zero
+        # and No when it is zero. It is 0 while charging pauses (current ~0 A,
+        # SOC flat) and 1 while the battery takes charge. A payload too short to
+        # hold the byte keeps the old fixed Yes. analysis/legacy_mbb_disarmed_current.md.
+        mbb_charge_enabled = bool(x[0x0a]) if len(x) > 0x0a else True
 
         # Build structured data dictionary
         structured_data = {
@@ -2622,7 +2627,7 @@ class Gen2:
             'pack_voltage_volts': pack_voltage,
             'battery_current_amps': battery_current,
             'mods': mods,
-            'mbb_charge_enabled': True,  # Always true based on message format
+            'mbb_charge_enabled': mbb_charge_enabled,
             'bms_charge_enabled': False  # Always false based on message format
         }
 
@@ -2630,14 +2635,15 @@ class Gen2:
         legacy_conditions = (
             'PackTemp: h {pack_temp_hi}C, l {pack_temp_low}C, AmbTemp: {ambient_temp}C, '
             'PackSOC:{soc:3d}%, Vpack:{pack_voltage:7.3f}V, BattAmps: {battery_current:3d}, '
-            'Mods: {mods:02b}, MbbChgEn: Yes, BmsChgEn: No').format(
+            'Mods: {mods:02b}, MbbChgEn: {mbb_chg_en}, BmsChgEn: No').format(
                 pack_temp_hi=pack_temp_hi,
                 pack_temp_low=pack_temp_low,
                 ambient_temp=ambient_temp,
                 soc=soc,
                 pack_voltage=pack_voltage,
                 battery_current=battery_current,
-                mods=mods)
+                mods=mods,
+                mbb_chg_en='Yes' if mbb_charge_enabled else 'No')
 
         return {
             'event': 'Charging',
