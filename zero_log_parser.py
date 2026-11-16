@@ -4729,7 +4729,10 @@ class Gen2:
         # Extract binary data once
         limit = BinaryTools.unpack('uint16', x, 0x00)
         min_cell_mv = BinaryTools.unpack('uint16', x, 0x02)
-        temp = BinaryTools.unpack('uint8', x, 0x04)
+        # MaxPackTemp is a signed byte (the firmware renderer reads it with
+        # ldrsb); below freezing it read 255..242 C as uint8.
+        # analysis/legacy_mbb_disarmed_current.md.
+        temp = BinaryTools.unpack('int8', x, 0x04)
         max_amp = BinaryTools.unpack('uint16', x, 0x05)
 
         # Build structured data

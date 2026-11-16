@@ -119,3 +119,27 @@ def test_pack_temps_above_freezing_unchanged():
     sd = _decode(0x2d, _charging_payload(pack_hi=35, pack_lo=31))['structured_data']
     assert (sd['pack_temp_high_celsius'], sd['pack_temp_low_celsius']) == (35, 31)
     assert sd['battery_current_amps'] == -12
+
+
+def _current_limited(max_pack_temp, limit=80, min_cell_mv=3300, max_amp=200):
+    """7-byte Batt Dischg Cur Limited (0x39) payload."""
+    p = bytearray(7)
+    struct.pack_into('<H', p, 0x00, limit)
+    struct.pack_into('<H', p, 0x02, min_cell_mv)
+    struct.pack_into('<b', p, 0x04, max_pack_temp)
+    struct.pack_into('<H', p, 0x05, max_amp)
+    return p
+
+
+def test_current_limited_max_pack_temp_below_freezing():
+    # -2 C (byte fe): the uint8 read showed 254 C.
+    out = _decode(0x39, _current_limited(-2))
+    assert out['event'] == 'Batt Dischg Cur Limited'
+    assert out['structured_data']['max_pack_temp_celsius'] == -2
+    assert 'MaxPackTemp: -2C' in out['conditions']
+
+
+def test_current_limited_positive_temp_unchanged():
+    sd = _decode(0x39, _current_limited(47))['structured_data']
+    assert sd['max_pack_temp_celsius'] == 47
+    assert (sd['limit_current_amps'], sd['max_current_amps'], sd['min_cell_voltage_mv']) == (80, 200, 3300)
