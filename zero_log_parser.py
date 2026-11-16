@@ -518,8 +518,8 @@ class BinaryTools:
                     H=BinaryTools.unpack('uint16', x, 0x02),
                     B=BinaryTools.unpack('uint16', x, 0x02) - BinaryTools.unpack('uint16', x, 0x0),
                     l=BinaryTools.unpack('uint16', x, 0x14),
-                    PT=BinaryTools.unpack('uint8', x, 0x04),
-                    BT=BinaryTools.unpack('uint8', x, 0x05),
+                    PT=BinaryTools.unpack('int8', x, 0x04),
+                    BT=BinaryTools.unpack('int8', x, 0x05),
                     PV=BinaryTools.unpack('uint32', x, 0x0b) / 1000.0)
         }
 
@@ -1153,8 +1153,12 @@ class Gen2:
             'voltage_unloaded_cell_volts': BinaryTools.unpack('uint16', x, 0x14) / 1000.0,
             'voltage_high_cell_volts': BinaryTools.unpack('uint16', x, 0x02) / 1000.0,
             'voltage_balance_mv': BinaryTools.unpack('uint16', x, 0x02) - BinaryTools.unpack('uint16', x, 0x0),
-            'pack_temp_celsius': BinaryTools.unpack('uint8', x, 0x04),
-            'bms_temp_celsius': BinaryTools.unpack('uint8', x, 0x05),
+            # Pack and BMS board temperatures are signed bytes: below freezing
+            # they read 255..242 C as uint8. The negative pack values match the
+            # MBB's own (signed) pack temperatures on the same bike at the same
+            # time. analysis/legacy_mbb_disarmed_current.md.
+            'pack_temp_celsius': BinaryTools.unpack('int8', x, 0x04),
+            'bms_temp_celsius': BinaryTools.unpack('int8', x, 0x05),
             'pack_voltage_volts': BinaryTools.unpack('uint32', x, 0x0b) / 1000.0,
             'pack_voltage_mv': BinaryTools.unpack('uint32', x, 0x0b),  # For backward compatibility
             'mode': bike_states.get(BinaryTools.unpack('uint8', x, 0x0f))
