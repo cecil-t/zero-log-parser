@@ -7503,6 +7503,12 @@ class LogData(object):
                     sys_info['Pack serial number'] = log.unpack_str(0x06c, count=7)
         elif self.log_file.is_unknown():
             sys_info['System info'] = 'unknown'
+        # The initial date is the firmware's build date text, "Mmm dd yyyy
+        # hh:mm:ss". Anything else at that offset (log text, numbers or binary
+        # from a damaged or overwritten header) is not a date: 'Unknown', as
+        # for the other header fields that cannot be read.
+        if 'Initial date' in sys_info and not self.is_build_date_text(sys_info['Initial date']):
+            sys_info['Initial date'] = 'Unknown'
         self.vin_source = self.settle_vin(sys_info, header_vin)
 
         # log_info.platform: 'gen3' for files that start with an FST/Gen3
@@ -7528,6 +7534,19 @@ class LogData(object):
     _SHIFTED_DATE_RE = re.compile(r'[A-Z][a-z]{2} [ 0-9][0-9] [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2}')
     _SHIFTED_SERIAL_RE = re.compile(r'[A-Za-z0-9_-]{8,}')
     _SHIFTED_MODEL_RE = re.compile(r'[A-Z0-9_]{2,%d}' % (CLASSIC_MODEL_FIELD_LENGTH - 1))
+
+    @classmethod
+    def is_build_date_text(cls, text):
+        """True for a firmware build date as the header stores it,
+        "Mmm dd yyyy hh:mm:ss" (C __DATE__ and __TIME__; the day may be
+        space-padded), naming a real date and time."""
+        if not isinstance(text, str) or not cls._SHIFTED_DATE_RE.fullmatch(text):
+            return False
+        try:
+            datetime.strptime(text, '%b %d %Y %H:%M:%S')
+        except ValueError:
+            return False
+        return True
 
     @classmethod
     def classic_board_rev(cls, raw, offset, version):
