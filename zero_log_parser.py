@@ -1836,6 +1836,8 @@ class Gen2:
         'PRECHARGE_COMPLETE', 'FAULT',
     ])
     GEN3_STORAGE_MODE_SECONDS = 31536000
+    # Numbers a Gen3 text field holds as an unset marker: 0x7fffffff, 0xffffffff.
+    GEN3_TEXT_UNSET_VALUES = (0x7fffffff, 0xffffffff)
     GEN3_TEXT_PATTERNS = (
         ('limits', re.compile(r'(Disch|Ch) limits: curr (\d+) cap (\d+) act (\d+) pow (\d+)')),
         ('twelve_volt', re.compile(
@@ -2262,7 +2264,10 @@ class Gen2:
                 return {'text': text, 'text_event': 'limits',
                         'limit_direction': 'discharge' if g[0] == 'Disch' else 'charge',
                         'limit_curr': int(g[1]), 'limit_cap': int(g[2]),
-                        'limit_act': int(g[3]), 'limit_pow': int(g[4])}
+                        # 2147483647 (0x7fffffff) is the firmware's "no active
+                        # limit" value, not a limit.
+                        'limit_act': None if int(g[3]) in cls.GEN3_TEXT_UNSET_VALUES else int(g[3]),
+                        'limit_pow': int(g[4])}
             if kind == 'twelve_volt':
                 return {'text': text, 'text_event': 'twelve_volt_charge',
                         'charge_phase': g[0].lower(),

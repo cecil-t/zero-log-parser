@@ -28,7 +28,7 @@ def _gen3(text, subsecond=161000):
 def test_charge_and_discharge_limits():
     sd = Gen2.gen3_text_event(_gen3('Ch limits: curr 143 cap 143 act 2147483647 pow 14829'))
     assert sd['text_event'] == 'limits' and sd['limit_direction'] == 'charge'
-    assert (sd['limit_curr'], sd['limit_cap'], sd['limit_act'], sd['limit_pow']) == (143, 143, 2147483647, 14829)
+    assert (sd['limit_curr'], sd['limit_cap'], sd['limit_act'], sd['limit_pow']) == (143, 143, None, 14829)   # 0x7fffffff: unset
     sd = Gen2.gen3_text_event(_gen3('Disch limits: curr 1279 cap 1279 act 0 pow 133656'))
     assert sd['limit_direction'] == 'discharge' and sd['limit_pow'] == 133656
 
@@ -193,3 +193,9 @@ def test_legacy_path_keeps_the_structured_data_it_had_for_prefixed_payloads():
 def test_a_genuinely_empty_message_is_not_marked_corrupted():
     entry = _parse(_gen3(b''), gen3_text=True)
     assert not (entry.get('structured_data') or {}).get('bytes_corrupted')
+
+
+def test_limit_act_keeps_a_real_value():
+    from zero_log_parser import Gen2
+    sd = Gen2._gen3_text_structured('Disch limits: curr 563 cap 563 act 400 pow 56412')
+    assert sd['limit_act'] == 400
