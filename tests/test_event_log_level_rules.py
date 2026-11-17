@@ -30,6 +30,7 @@ CASES = {
     'soft-reset-crash': ('CPU Soft Reset:            Hard Fault', 'ERROR'),
     'soft-reset-other': ('CPU Soft Reset:            Key cycle from charge fault shutdown', 'WARNING'),
     'abs-sila': ('ABS SILA reporting an error', 'WARNING'),
+    'low-chassis-isolation': ('Low Chassis Isolation', 'WARNING'),
 }
 
 UNCHANGED = (
@@ -97,3 +98,9 @@ def test_sevcon_emcy_level_follows_the_error_register():
     reset = Gen2.sevcon_status(bytes.fromhex('0000c54500000000'))
     assert active['structured_data']['error_register'] == 4 and active['log_level'] == 'WARNING'
     assert reset['structured_data']['error_register'] == 0 and 'log_level' not in reset
+
+
+def test_low_chassis_isolation_is_a_warning():
+    from zero_log_parser import event_log_level
+    assert event_log_level('Low Chassis Isolation') == 'WARNING'
+    assert event_log_level('MBB BMS Isolation Fault') == 'ERROR'   # unchanged: payload byte is the BMS number

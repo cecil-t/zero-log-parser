@@ -388,6 +388,9 @@ EVENT_LOG_LEVEL_RULES = tuple((rule, re.compile(pattern), level) for rule, patte
                          r'|Failed to Hibernate|Hibernate Aborted)', 'WARNING'),
     # ABS warning lamp (Bosch SILA, Sicherheitslampe).
     ('abs-sila', r'^ABS SILA reporting an error', 'WARNING'),
+    # MBB type 0x3A, "Low Chassis Isolation N KOhms to cell N": the bike
+    # reporting low isolation resistance to the chassis (0-100 kOhms).
+    ('low-chassis-isolation', r'^Low Chassis Isolation$', 'WARNING'),
 ))
 
 
