@@ -255,3 +255,11 @@ def test_temp_flags_renders_in_text_output_without_a_temperature_unit():
     assert 'Temp Flags: 2,' in text
     assert 'Temp Flags: 2°C' not in text
     assert 'Motor Temp C: 41°C' in text
+
+
+def test_dc_bus_current_scale_by_revision():
+    from zero_log_parser import Gen2
+    assert Gen2.telemetry_dc_bus_current_divisor(6) == 10000.0
+    assert Gen2.telemetry_dc_bus_current_divisor(11) == 10000.0
+    for rev in (12, 13, 14, 46, None):
+        assert Gen2.telemetry_dc_bus_current_divisor(rev) == 1000.0

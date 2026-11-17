@@ -4395,6 +4395,22 @@ class Gen2:
         i_text = 'n/a' if amps is None else f'{amps:.3f}'
         return soc, volts, amps, f'SOC:{soc_text}%, Vpack:{v_text}V, I:{i_text}A'
 
+    # DC bus current unit by MBB firmware revision (John Myers' (atomicdog)
+    # Gen3 datasheet, firmware-sourced): 0.1 mA through rev 11, mA from rev
+    # 14. Rev 12-13 are not stated; the only rev 13 entries in the file set
+    # (one file, no riding) cannot tell the units apart, so they keep mA, as
+    # do entries whose revision is unknown. From rev 14 the mA reading
+    # matches the pack current while riding (median ratio about 1.1).
+    TELEMETRY_DC_BUS_TENTH_MA_MAX_REV = 11
+
+    @classmethod
+    def telemetry_dc_bus_current_divisor(cls, entry_rev):
+        """Raw DC bus current counts per ampere for the revision an entry
+        was written under (see TELEMETRY_DC_BUS_TENTH_MA_MAX_REV)."""
+        if isinstance(entry_rev, int) and entry_rev <= cls.TELEMETRY_DC_BUS_TENTH_MA_MAX_REV:
+            return 10000.0
+        return 1000.0
+
     @classmethod
     def telemetry_temperature(cls, x, offset, limit, scale=1.0):
         """A temperature stored as a little-endian int32 whose real range is
@@ -4509,7 +4525,7 @@ class Gen2:
             'bms_data_valid': bms_ok,
             'temp_flags': temp_flags,
             'dc_bus_voltage_volts': ctl(dc_bus_mv / 1000.0),
-            'dc_bus_current_amps': ctl(dc_bus_ma / 1000.0),
+            'dc_bus_current_amps': ctl(dc_bus_ma / cls.telemetry_dc_bus_current_divisor(entry_rev)),
             'motor_rpm': ctl(rpm),
             'ambient_temperature_c': temperature('ambient_temperature_c', ambient),
             'motor_temp_c': ctl(temperature('motor_temp_c', motor_t)),
