@@ -1228,8 +1228,8 @@ class Gen2:
           paired 0x3 record's own low/high cell fields in every testable
           record
         - bytes 7-8: uint16 high minus low (mV), always exactly H - L
-        - byte 9: BMS temperature (degrees C), identical to the paired
-          0x3 record's BMS temperature byte
+        - byte 9: BMS temperature (degrees C, signed byte), identical to
+          the paired 0x3 record's BMS temperature byte
         Bytes 0 and 1 (each always 1-28, never equal to each other) are
         not identified and stay in raw_hex with the rest of the payload.
         Any other length falls back to unhandled_entry_format().
@@ -1244,7 +1244,8 @@ class Gen2:
             'voltage_low_cell_volts': low_mv / 1000.0,
             'voltage_high_cell_volts': high_mv / 1000.0,
             'voltage_balance_mv': BinaryTools.unpack('uint16', x, 0x07),
-            'bms_temp_celsius': BinaryTools.unpack('uint8', x, 0x09),
+            # signed, like the BMS temperature byte of the paired 0x3 record
+            'bms_temp_celsius': BinaryTools.unpack('int8', x, 0x09),
             'raw_hex': bytes(x).hex(),
         }
         return {

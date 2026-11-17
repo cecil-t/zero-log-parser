@@ -107,3 +107,15 @@ def test_raw_hex_renders_as_undecoded_tag():
     d = Gen2.bms_storage_stats(SAMPLE_BAL_ACTIVE)['structured_data']
     assert (Gen2.undecoded_hex_display(bytes.fromhex(d['raw_hex']))
             == '{undecoded hex: 02 01 0a 0e 10 0f 10 01 00 2b}')
+
+
+def test_bms_temp_is_signed():
+    x = bytearray(10)
+    x[2] = 3
+    x[3:5] = (3300).to_bytes(2, 'little')
+    x[5:7] = (3310).to_bytes(2, 'little')
+    x[7:9] = (10).to_bytes(2, 'little')
+    x[9] = 0xF6                       # -10 C
+    e = Gen2.bms_storage_stats(bytes(x))
+    assert e['structured_data']['bms_temp_celsius'] == -10
+    assert e['conditions'].startswith('Bal res active: 3,')
