@@ -6047,6 +6047,27 @@ class Gen2:
             earlier.append((i, start, length))
         return found
 
+    # A walked entry needs at least its type byte and 4 time bytes to be one.
+    ERASED_MIN_BYTES = 5
+
+    @classmethod
+    def is_erased_span(cls, buf, span):
+        """True when a walked entry's type, time and payload bytes (after the
+        0xb2 and its length byte) are all 0xff: erased flash read as an
+        entry. The bytes are taken up to the end of the span or the next
+        0xb2 in it, whichever comes first, since erased flash can carry a
+        length byte that runs into the next real entry. span is
+        (start, length) in buf as the walkers record it, or None."""
+        if span is None:
+            return False
+        start, length = span
+        end = start + length
+        nxt = buf.find(b'\xb2', start + 2, end)
+        if nxt >= 0:
+            end = nxt
+        body = bytes(buf[start + 2:end])
+        return len(body) >= cls.ERASED_MIN_BYTES and body == b'\xff' * len(body)
+
     @classmethod
     def drop_duplicate_entries(cls, buf, collected, spans):
         """collected (the walk's (sort_timestamp, entry_payload, entry_num)
@@ -6781,6 +6802,15 @@ class LogData(object):
                     except Exception as e:
                         logger.warning(f'Error parsing entry {entry_num}: {e}')
                         break
+
+            # A walked "entry" whose bytes after the 0xb2 and its length byte
+            # (type, time and payload) are all 0xff is erased flash, not an entry: drop it
+            # (Gen2.is_erased_span). The other entries keep their numbers.
+            if len(entry_spans) == len(collected_entries):
+                kept = [k for k, span in enumerate(entry_spans) if not Gen2.is_erased_span(self.entries, span)]
+                if len(kept) != len(collected_entries):
+                    collected_entries = [collected_entries[k] for k in kept]
+                    entry_spans = [entry_spans[k] for k in kept]
 
             # FST/Gen3 MBB telemetry: some fields depend on the firmware
             # revision each entry was written under, which needs the whole
