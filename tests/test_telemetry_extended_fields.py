@@ -154,7 +154,7 @@ def test_controller_flag_turns_controller_side_fields_into_none():
         assert sd['ambient_temperature_c'] == 12.5
 
 
-def test_bms_flag_makes_pack_voltage_and_current_none_but_not_soc_or_other_groups():
+def test_bms_flag_makes_soc_pack_voltage_and_current_none_but_not_other_groups():
     for message_type, length in ((0x51, 64), (0x51, 68), (0x52, 81), (0x52, 85), (0x53, 95), (0x53, 99)):
         for flags in (0x60, 0xc0, 0xe0):
             out = _decode(message_type, _payload(message_type, length, flags=flags))
@@ -163,7 +163,7 @@ def test_bms_flag_makes_pack_voltage_and_current_none_but_not_soc_or_other_group
             assert sd['motor_controller_data_valid'] is True
             assert sd['pack_voltage_volts'] is None
             assert sd['battery_current_amps'] is None
-            assert sd['state_of_charge_percent'] == 64
+            assert sd['state_of_charge_percent'] is None      # SOC is in the BMS group too
             assert sd['pack_temperature_warmest_c'] == 16
             assert 'Vpack:n/aV' in out['conditions'] and 'I:n/aA' in out['conditions']
 

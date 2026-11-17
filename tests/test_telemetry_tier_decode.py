@@ -164,7 +164,8 @@ def test_zero_voltage_and_current_in_hib_are_none_when_the_bms_flag_is_set():
         out = Gen2.vehicle_state_telemetry_tier(message_type, payload)
         sd = out['structured_data']
         assert sd['pack_voltage_volts'] is None and sd['battery_current_amps'] is None
-        assert sd['state_of_charge_percent'] == 71
+        assert sd['state_of_charge_percent'] is None
+        assert 'SOC:n/a%' in out['conditions']
         assert 'Vpack:n/aV' in out['conditions']
 
 

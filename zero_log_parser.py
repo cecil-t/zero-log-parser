@@ -4351,18 +4351,21 @@ class Gen2:
         in every such entry both read zero, so the zero is a marker, not a
         measurement (analysis/gen3_page_claims.md, Phase 3 Part 2b; 43,356 of
         82,840 entries). Before this change that zero was exposed raw. SOC is
-        not in the group and is always reported. Returns (soc, volts, amps,
+        None under the same flag: the SOC comes from the BMS, so while the
+        BMS is not reporting it is 0 (PWSU, WAIT) or the last value from
+        before (mostly HIB), not a reading. Returns (soc, volts, amps,
         conditions fragment)."""
-        soc = BinaryTools.unpack('uint8', x, tag_offset - 9)
         flags = BinaryTools.unpack('uint8', x, tag_offset - 25)
         if flags & cls.TELEMETRY_BMS_FLAG_MASK:
-            volts = amps = None
+            soc = volts = amps = None
         else:
+            soc = BinaryTools.unpack('uint8', x, tag_offset - 9)
             volts = BinaryTools.unpack('uint32', x, tag_offset - 8) / 1000.0
             amps = BinaryTools.unpack('int32', x, tag_offset - 4) / 1000.0
+        soc_text = 'n/a' if soc is None else soc
         v_text = 'n/a' if volts is None else f'{volts:.3f}'
         i_text = 'n/a' if amps is None else f'{amps:.3f}'
-        return soc, volts, amps, f'SOC:{soc}%, Vpack:{v_text}V, I:{i_text}A'
+        return soc, volts, amps, f'SOC:{soc_text}%, Vpack:{v_text}V, I:{i_text}A'
 
     @classmethod
     def telemetry_temperature(cls, x, offset, limit, scale=1.0):
