@@ -48,7 +48,7 @@ def _entry(message_type, timestamp, payload):
 
 def _battery_status_payload(event):
     """battery_status() (type 0x33): precharge_percent is None whenever
-    event != 1 (event 1 is "Closing Contractor")."""
+    event != 1 (event 1 is "Closing Contactor")."""
     payload = bytearray(0x14)
     payload[0x0] = event
     payload[0x1] = 3  # module_num
@@ -101,7 +101,7 @@ def test_none_field_is_omitted_from_text_output_not_printed_as_none():
     assert 'Precharge Percent' not in text
     # The rest of the entry still renders normally.
     assert 'Module Number: 3' in text
-    assert 'Event Type: Opening Contractor' in text
+    assert 'Event Type: Opening Contactor' in text
 
 
 def test_none_field_with_unit_suffix_key_does_not_leak_as_nonepercent():
@@ -113,7 +113,7 @@ def test_none_field_with_unit_suffix_key_does_not_leak_as_nonepercent():
 
 
 def test_precharge_percent_still_renders_when_applicable():
-    text = _run_txt(_entry(0x33, 1_700_000_000, _battery_status_payload(event=0x01)))  # Closing Contractor
+    text = _run_txt(_entry(0x33, 1_700_000_000, _battery_status_payload(event=0x01)))  # Closing Contactor
     assert 'Precharge Percent:' in text
     assert 'None' not in text
 

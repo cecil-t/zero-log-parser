@@ -4609,8 +4609,8 @@ class Gen2:
 
     @classmethod
     def battery_status(cls, x):
-        opening_contactor = 'Opening Contractor'
-        closing_contactor = 'Closing Contractor'
+        opening_contactor = 'Opening Contactor'
+        closing_contactor = 'Closing Contactor'
         registered = 'Registered'
         events = {
             0x00: opening_contactor,

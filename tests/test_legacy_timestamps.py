@@ -51,7 +51,7 @@ def _entry(message_type, timestamp, payload):
 
 def _battery_status_payload(event):
     """battery_status() (type 0x33): precharge_percent is None whenever
-    event != 1 (event 1 is "Closing Contractor")."""
+    event != 1 (event 1 is "Closing Contactor")."""
     payload = bytearray(0x14)
     payload[0x0] = event
     payload[0x1] = 3  # module_num
