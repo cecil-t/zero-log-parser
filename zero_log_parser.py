@@ -391,6 +391,16 @@ EVENT_LOG_LEVEL_RULES = tuple((rule, re.compile(pattern), level) for rule, patte
 ))
 
 
+# TXT writer units for keys the name-based unit rules in
+# emit_zero_compatible_decoding() get wrong ('ma' read out of "max", a flag
+# whose name contains "current"). Checked before those rules.
+TXT_UNIT_BY_KEY = {
+    'max_current_amps': 'A',            # Batt Dischg Cur Limited
+    'max_pack_temp_celsius': '\u00b0C',   # Batt Dischg Cur Limited
+    'is_current_limited': '',           # Batt Dischg Cur Limited, a flag
+}
+
+
 def event_rule_log_level(message: str):
     """Level from EVENT_LOG_LEVEL_RULES for the event text, or None."""
     for _rule, pattern, level in EVENT_LOG_LEVEL_RULES:
@@ -8010,6 +8020,8 @@ class LogData(object):
                 # (0x51-0x53), a bit field whose 'temp' would otherwise get a
                 # temperature unit.
                 key_lower = key.lower()
+                if key in TXT_UNIT_BY_KEY:
+                    return f"{value}{TXT_UNIT_BY_KEY[key]}"
                 if 'percent' in key_lower:
                     return f"{value}%"
                 elif key != 'marker' and 'ma' in key_lower:  # Check mA before amps to avoid conflict
