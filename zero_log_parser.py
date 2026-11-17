@@ -929,13 +929,32 @@ class Gen2:
         day = min(t.tm_mday, calendar.monthrange(year, month)[1])
         return calendar.timegm((year, month, day, t.tm_hour, t.tm_min, t.tm_sec))
 
+    # VIN position 10 model-year codes. A clock value before 1 January of
+    # (model year - 2) cannot be real on that bike.
+    VIN_MODEL_YEARS = dict(zip('ABCDEFGHJKLMNPRSTVWXY', range(2010, 2031)))
+    VIN_CLOCK_FLOOR_YEARS_BEFORE = 2
+
     @classmethod
-    def backfill_window(cls, clock_epochs, now=None):
+    def vin_clock_floor(cls, vin):
+        """Earliest raw wall-clock epoch accepted as a date for a bike with
+        this VIN: 1 January (UTC) of its model year minus 2, never below
+        CLOCK_MIN. None when the VIN fails the check digit or its model-year
+        code is not known (the caller then keeps CLOCK_MIN)."""
+        if not vin or not is_valid_vin_checksum(vin):
+            return None
+        year = cls.VIN_MODEL_YEARS.get(vin.upper()[9])
+        if year is None:
+            return None
+        return max(cls.CLOCK_MIN, calendar.timegm((year - cls.VIN_CLOCK_FLOOR_YEARS_BEFORE, 1, 1, 0, 0, 0)))
+
+    @classmethod
+    def backfill_window(cls, clock_epochs, now=None, clock_floor=None):
         """(earliest, latest) UTC epoch a backfilled time may take: the file's
         earliest clock time minus BACKFILL_MARGIN_MONTHS to its latest plus
-        BACKFILL_MARGIN_MONTHS, inside CLOCK_MIN and clock_max(now). With no
-        clock times it is CLOCK_MIN to clock_max(now)."""
-        lo, hi = cls.CLOCK_MIN, cls.clock_max(now)
+        BACKFILL_MARGIN_MONTHS, inside the clock floor (CLOCK_MIN unless a
+        later clock_floor is given) and clock_max(now). With no clock times
+        it is the clock floor to clock_max(now)."""
+        lo, hi = max(cls.CLOCK_MIN, clock_floor or cls.CLOCK_MIN), cls.clock_max(now)
         if clock_epochs:
             lo = max(lo, cls.shift_months(min(clock_epochs), -cls.BACKFILL_MARGIN_MONTHS))
             hi = min(hi, cls.shift_months(max(clock_epochs), cls.BACKFILL_MARGIN_MONTHS))
@@ -1045,7 +1064,7 @@ class Gen2:
         return epoch, source, rejected
 
     @classmethod
-    def assign_legacy_times(cls, collected, timezone_offset=None, now=None):
+    def assign_legacy_times(cls, collected, timezone_offset=None, now=None, clock_floor=None):
         """
         Give every legacy (Gen2 parse_entry) entry its time, from the raw uint32.
 
@@ -1071,12 +1090,17 @@ class Gen2:
 
         collected: list of (sort_timestamp, payload, entry_num) in log order.
         now: the moment the future limit is measured from (default: the current time).
+        clock_floor: the earliest raw value accepted as a date (vin_clock_floor()
+        of the file's VIN); a value from CLOCK_MIN up to it is "invalid", so it
+        cannot anchor a backfill either: the next clock value in the cycle
+        does. None keeps CLOCK_MIN. Backfilled times may not fall below it.
         Returns the same shape, with sort_timestamp a true UTC epoch (0 for
         uptime-only and timeless entries), payload['time'] the display string,
         and payload['time_source'/'raw_timestamp'/'uptime_s'/'_order'] set.
         """
         offset = timezone_offset or 0
         clock_max = cls.clock_max(now)
+        floor = max(cls.CLOCK_MIN, clock_floor or cls.CLOCK_MIN)
         n = len(collected)
         raw_of = lambda i: collected[i][1]['original_timestamp']
         kind = [None] * n          # 'clock', 'uptime', 'invalid' or None (entry has no raw timestamp)
@@ -1086,11 +1110,11 @@ class Gen2:
                 continue
             if raw < cls.CLOCK_MIN:
                 kind[i] = 'uptime'
-            elif raw <= clock_max:
+            elif floor <= raw <= clock_max:
                 kind[i] = 'clock'
             else:
                 kind[i] = 'invalid'
-        lo, hi = cls.backfill_window([raw_of(i) for i in range(n) if kind[i] == 'clock'], now)
+        lo, hi = cls.backfill_window([raw_of(i) for i in range(n) if kind[i] == 'clock'], now, floor)
         for i in range(n):
             if kind[i] == 'uptime' and raw_of(i) > hi - lo:
                 kind[i] = 'invalid'
@@ -6823,7 +6847,13 @@ class LogData(object):
 
             # Assign times per power cycle (replaces the old linear interpolation
             # by entry number, which ran across power cycles)
-            collected_entries = Gen2.assign_legacy_times(collected_entries, self.timezone_offset)
+            # A clock value before the bike's VIN model year minus 2 is not a
+            # date (Gen2.vin_clock_floor); the VIN is the one settle_vin chose.
+            clock_floor = None
+            if getattr(self, 'vin_source', None) in ('header', 'filename'):
+                clock_floor = Gen2.vin_clock_floor(self.header_info.get('VIN'))
+            collected_entries = Gen2.assign_legacy_times(collected_entries, self.timezone_offset,
+                                                         clock_floor=clock_floor)
 
             # FST/Gen3 only: drop entries whose bytes repeat an earlier entry
             # (Gen2.find_duplicate_entries). log_version REV3 also covers
