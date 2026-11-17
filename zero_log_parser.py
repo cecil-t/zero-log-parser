@@ -2724,11 +2724,18 @@ class Gen2:
                               cause=cause.get(sevcon_code, 'Unknown')
                           )
 
-        return {
+        entry = {
             'event': 'SEVCON CAN EMCY Frame',
             'structured_data': structured_data,
             'conditions': legacy_conditions
         }
+        # CANopen error register: non-zero while the controller reports an
+        # active error (a frame with register 0 is an error reset). Warning,
+        # not Error: which error codes are routine is not known yet. The event
+        # text is the same either way, so the level is set here.
+        if error_reg:
+            entry['log_level'] = 'WARNING'
+        return entry
 
     @classmethod
     def charger_status(cls, x):

@@ -89,3 +89,11 @@ def test_rules_do_not_widen_to_neighbouring_text():
                  'CPU Soft Reset: Brownout fault', 'Settings Read Failed',
                  'Accelerometer Selftest Failed'):
         assert event_log_level(text) == determine_log_level(text) == 'ERROR', text
+
+
+def test_sevcon_emcy_level_follows_the_error_register():
+    from zero_log_parser import Gen2
+    active = Gen2.sevcon_status(bytes.fromhex('0031c54504080700'))
+    reset = Gen2.sevcon_status(bytes.fromhex('0000c54500000000'))
+    assert active['structured_data']['error_register'] == 4 and active['log_level'] == 'WARNING'
+    assert reset['structured_data']['error_register'] == 0 and 'log_level' not in reset
