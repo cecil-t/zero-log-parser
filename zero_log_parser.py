@@ -382,8 +382,11 @@ EVENT_LOG_LEVEL_RULES = tuple((rule, re.compile(pattern), level) for rule, patte
     ('bluetooth', r'^RN-?\d+ (configuration FAILED|autoconnect sequence failed after \d+\s+retries)', 'WARNING'),
     # Dash communication; not a vehicle fault.
     ('dash-comms', r'^Failed to send nav pkt to dash', 'WARNING'),
-    # Why the last reset happened: a crash stays ERROR, the others are WARNING.
-    ('soft-reset-crash', r'^\s*CPU Soft Reset:\s+Hard Fault', 'ERROR'),
+    # Why the last reset happened, reported after the reboot: WARNING. For a
+    # Hard Fault the crash itself is already logged at ERROR, as "Hard Fault
+    # Exception Occured." or "Hard Fault Interrupt Occured.", 9 to 29 entries
+    # before this report (1,317 of 1,323 reports), so one crash is one Error.
+    ('soft-reset-crash', r'^\s*CPU Soft Reset:\s+Hard Fault', 'WARNING'),
     ('soft-reset-other', r'^\s*CPU Soft Reset:\s+(Key cycle from (charge fault|critical error) shutdown'
                          r'|Failed to Hibernate|Hibernate Aborted)', 'WARNING'),
     # ABS warning lamp (Bosch SILA, Sicherheitslampe).

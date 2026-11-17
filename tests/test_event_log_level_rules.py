@@ -27,7 +27,7 @@ CASES = {
     'non-critical-contactor': ('Sending non critical contactor open command to PackIO. TSIPS: 987ms', 'WARNING'),
     'bluetooth': ('RN-42 autoconnect sequence failed after 9  retries', 'WARNING'),
     'dash-comms': ('Failed to send nav pkt to dash. ISOTP_RET=6', 'WARNING'),
-    'soft-reset-crash': ('CPU Soft Reset:            Hard Fault', 'ERROR'),
+    'soft-reset-crash': ('CPU Soft Reset:            Hard Fault', 'WARNING'),
     'soft-reset-other': ('CPU Soft Reset:            Key cycle from charge fault shutdown', 'WARNING'),
     'abs-sila': ('ABS SILA reporting an error', 'WARNING'),
     'low-chassis-isolation': ('Low Chassis Isolation', 'WARNING'),
@@ -68,8 +68,11 @@ def test_soft_reset_split_both_ways():
              'CPU Soft Reset: Failed to Hibernate',
              'CPU Soft Reset: Hibernate Aborted']
     got = _levels(crash + other)
-    assert [got[t] for t in crash] == ['ERROR'] * 2
+    assert [got[t] for t in crash] == ['WARNING'] * 2
     assert [got[t] for t in other] == ['WARNING'] * 4
+    # the crash itself stays an error
+    assert event_log_level('Hard Fault Exception Occured.') == 'ERROR'
+    assert event_log_level('Hard Fault Interrupt Occured.  Stack:') == 'ERROR'
 
 
 def test_rn42_retry_text_is_warning():
