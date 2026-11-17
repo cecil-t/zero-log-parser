@@ -141,7 +141,7 @@ def test_rev1_mbb():
     assert j['log_info'] == {
         'vin': '538SMCZ66HCG07739', 'serial_number': 'sj4216zer0653',
         'initial_date': 'Aug  9 2019 14:21:01', 'model': 'SR',
-        'firmware_rev': 29, 'board_rev': 1956,
+        'firmware_rev': 29, 'board_rev': 7,
         'bms_serial_number': 'Unknown', 'pack_serial_number': 'Unknown', 'vin_source': 'header', 'platform': 'legacy'}
     _assert_matches_header(ld, j)
 

@@ -6633,6 +6633,8 @@ REV_UNKNOWN = -1  # No legacy VIN offset validated and no ring-buffer marker fou
 
 
 class LogData(object):
+    # REV1 MBB header: the constant byte before the board revision (0x268)
+    REV1_BOARD_REV_LEAD = 0xa4
     """
     :type log_version: int
     :type header_info: Dict[str, str]
@@ -7272,8 +7274,16 @@ class LogData(object):
                     # values, 93%+ per-VIN stable - see
                     # analysis/rev1_board_rev.md and
                     # analysis/issue11_status.md section 0c.
+                    # The revision itself is the byte at 0x269: 0x268 holds a
+                    # constant 0xa4 in every REV1 MBB header, so the uint16
+                    # read 0x0ba4 = 2980 for board rev. 11. In all 179 REV1
+                    # files whose own log text says "Initializing board rev
+                    # setting to NN", NN equals the byte at 0x269. A header
+                    # without the 0xa4 byte (blank or erased) keeps the
+                    # uint16 read.
                     try:
-                        sys_info['Board rev.'] = log.unpack('uint16', 0x268)
+                        log.require_length(0x26a, 'the board revision')
+                        sys_info['Board rev.'] = self.classic_board_rev(log.raw(), 0x268, REV1)
                     except Exception:
                         sys_info['Board rev.'] = 'Unknown'
                     # 0x26B is a lead byte (0xaa, or 0x41 on board rev. 420),
@@ -7520,6 +7530,15 @@ class LogData(object):
     _SHIFTED_MODEL_RE = re.compile(r'[A-Z0-9_]{2,%d}' % (CLASSIC_MODEL_FIELD_LENGTH - 1))
 
     @classmethod
+    def classic_board_rev(cls, raw, offset, version):
+        """Board rev. at offset in a classic MBB header: on REV1 the byte
+        after the constant REV1_BOARD_REV_LEAD (see get_version_and_header),
+        else the uint16 read there."""
+        if version == REV1 and raw[offset] == cls.REV1_BOARD_REV_LEAD:
+            return raw[offset + 1]
+        return BinaryTools.unpack('uint16', raw, offset)
+
+    @classmethod
     def find_shifted_classic_header(cls, raw):
         """The fields of a classic MBB header block found at a 0x100-aligned
         base other than 0, or None. Bases are tried nearest to 0 first. A
@@ -7561,7 +7580,7 @@ class LogData(object):
                     ('Serial number', serial),
                     ('VIN', vin),
                     ('Firmware rev.', BinaryTools.unpack('uint16', raw, base + firmware_o)),
-                    ('Board rev.', BinaryTools.unpack('uint16', raw, base + board_o)),
+                    ('Board rev.', cls.classic_board_rev(raw, base + board_o, version)),
                     ('Model', model),
                     ('Initial date', initial_date),
                 ])

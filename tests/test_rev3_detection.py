@@ -217,7 +217,7 @@ def test_unrecognized_format_header_has_no_missing_keys():
 
 
 def test_rev1_board_rev_is_read_from_0x268():
-    """uint16 @ 0x268, confirmed against 1,982 true-REV1 corpus files as a
+    """Bytes a4 0b at 0x268 (2980 as a uint16, the most common REV1 value), confirmed against 1,982 true-REV1 corpus files as a
     closed 8-value set with 93%+ per-VIN stability - see
     analysis/rev1_board_rev.md and analysis/issue11_status.md section 0c.
     2980 is the most common value found there, used here as a realistic
@@ -231,4 +231,4 @@ def test_rev1_board_rev_is_read_from_0x268():
     finally:
         os.unlink(path)
     assert log_version == REV1
-    assert header["Board rev."] == 2980
+    assert header["Board rev."] == 11     # bytes a4 0b: board rev. 11 at 0x269

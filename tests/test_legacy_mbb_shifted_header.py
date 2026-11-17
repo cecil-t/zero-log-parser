@@ -105,14 +105,14 @@ def assert_fields(header, ld, vin, model, firmware, board, serial):
 
 def test_rev1_block_0x100_later():
     _, header, ld = parse(place(rev1_image(VIN_A), 0x100))
-    assert_fields(header, ld, VIN_A, 'SR', 33, 2980, 'TST000000001')
+    assert_fields(header, ld, VIN_A, 'SR', 33, 11, 'TST000000001')
 
 
 def test_rev1_block_0x100_earlier():
     """The capture starts at flash 0x100: magic and first run date are
     missing, the block sits at 0x100."""
     _, header, ld = parse(place(rev1_image(VIN_A), -0x100))
-    assert_fields(header, ld, VIN_A, 'SR', 33, 2980, 'TST000000001')
+    assert_fields(header, ld, VIN_A, 'SR', 33, 11, 'TST000000001')
 
 
 def test_rev1_block_at_0x800_in_131072_byte_file():
@@ -121,12 +121,12 @@ def test_rev1_block_at_0x800_in_131072_byte_file():
     buf = bytearray(place(img[0x200:], 0x800, size=0x20000))
     buf[0:0x200] = img[0:0x200]
     _, header, ld = parse(bytes(buf))
-    assert_fields(header, ld, VIN_A, 'SR', 33, 2980, 'TST000000001')
+    assert_fields(header, ld, VIN_A, 'SR', 33, 11, 'TST000000001')
 
 
 def test_rev1_header_image_near_end_of_rotated_capture():
     _, header, ld = parse(place(rev1_image(VIN_A), 0x3e200))
-    assert_fields(header, ld, VIN_A, 'SR', 33, 2980, 'TST000000001')
+    assert_fields(header, ld, VIN_A, 'SR', 33, 11, 'TST000000001')
 
 
 def test_rev0_block_0x400_later():
@@ -150,7 +150,7 @@ def test_standard_header_wins_over_a_second_block():
     buf[0x3e200:0x3e500] = rev1_image(VIN_B, serial=b'TST000000002', model=b'DS', firmware=40, board=3492)
     version, header, ld = parse(bytes(buf))
     assert version == REV1
-    assert_fields(header, ld, VIN_A, 'SR', 33, 2980, 'TST000000001')
+    assert_fields(header, ld, VIN_A, 'SR', 33, 11, 'TST000000001')
 
 
 def test_block_with_a_bad_neighbouring_field_is_rejected():
