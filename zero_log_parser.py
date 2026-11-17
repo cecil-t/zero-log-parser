@@ -4621,6 +4621,8 @@ class Gen2:
             'structured_data': structured_data
         }
 
+    BATTERY_STATUS_NO_VCAP = 0xffffff9c   # -100 mV
+
     @classmethod
     def battery_status(cls, x):
         opening_contactor = 'Opening Contactor'
@@ -4638,7 +4640,11 @@ class Gen2:
         mod_volt = convert_mv_to_v(BinaryTools.unpack('uint32', x, 0x2))
         sys_max = convert_mv_to_v(BinaryTools.unpack('uint32', x, 0x6))
         sys_min = convert_mv_to_v(BinaryTools.unpack('uint32', x, 0xa))
-        capacitor_volt = convert_mv_to_v(BinaryTools.unpack('uint32', x, 0x0e))
+        capacitor_raw = BinaryTools.unpack('uint32', x, 0x0e)
+        # -100 mV (0xffffff9c) is the value written when there is no
+        # capacitor reading (key-on rows, controller not yet powered): it is
+        # the only negative value apart from damaged rows. Not a voltage.
+        capacitor_volt = None if capacitor_raw == cls.BATTERY_STATUS_NO_VCAP else convert_mv_to_v(capacitor_raw)
         battery_current = BinaryTools.unpack('int16', x, 0x12)
         serial_no = BinaryTools.unpack_str(x, 0x14, count=len(x[0x14:]))
 
@@ -4647,6 +4653,11 @@ class Gen2:
                                       if c not in string.printable)
         if not printable_serial_no:
             printable_serial_no = hex_of_value(serial_no)
+        # Only the Registered event carries the pack serial. In the other
+        # events these bytes are a constant of the MBB firmware (3c ff 00,
+        # 78 0b 00 or 08 0c 00), not a serial.
+        if event != 0x02:
+            printable_serial_no = None
 
         event_name = events.get(event, 'Unknown (0x{:02x})'.format(event))
 
@@ -4662,7 +4673,8 @@ class Gen2:
             'capacitor_voltage_volts': capacitor_volt,
             'battery_current_amps': battery_current,
             'serial_number': printable_serial_no,
-            'precharge_percent': convert_ratio_to_percent(capacitor_volt, mod_volt) if event == 1 else None
+            'precharge_percent': (convert_ratio_to_percent(capacitor_volt, mod_volt)
+                                  if event == 1 and capacitor_volt is not None else None)
         }
 
         # Generate legacy conditions string for backward compatibility
@@ -4673,16 +4685,17 @@ class Gen2:
             )
         elif event_name == closing_contactor:
             conditions_msg = ('vmod: {modvolt:7.3f}V, maxsys: {sysmax:7.3f}V, '
-                              'minsys: {sysmin:7.3f}V, diff: {diff:0.03f}V, vcap: {vcap:6.3f}V, '
-                              'prechg: {prechg:2.0f}%').format(
+                              'minsys: {sysmin:7.3f}V, diff: {diff:0.03f}V, vcap: {vcap}V, '
+                              'prechg: {prechg}%').format(
                 modvolt=mod_volt,
                 sysmax=sys_max,
                 sysmin=sys_min,
-                vcap=capacitor_volt,
+                vcap='n/a' if capacitor_volt is None else format(capacitor_volt, '6.3f'),
                 batcurr=battery_current,
                 serial=printable_serial_no,
                 diff=sys_max - sys_min,
-                prechg=convert_ratio_to_percent(capacitor_volt, mod_volt))
+                prechg=('n/a' if capacitor_volt is None
+                        else format(convert_ratio_to_percent(capacitor_volt, mod_volt), '2.0f')))
         elif event_name == registered:
             conditions_msg = 'serial: {serial},  vmod: {modvolt:3.3f}V'.format(
                 serial=printable_serial_no,
