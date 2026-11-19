@@ -404,6 +404,7 @@ TXT_UNIT_BY_KEY = {
     'max_current_amps': 'A',            # Batt Dischg Cur Limited
     'max_pack_temp_celsius': '\u00b0C',   # Batt Dischg Cur Limited
     'is_current_limited': '',           # Batt Dischg Cur Limited, a flag
+    'nominal_capacity_mah': 'mAh',      # BMS SOC Data
 }
 
 
@@ -2352,8 +2353,13 @@ class Gen2:
                         'soc_raw_1': safe_int(values[0]) if len(values) > 0 else 0,
                         'soc_raw_2': safe_int(values[1]) if len(values) > 1 else 0,
                         'soc_raw_3': safe_int(values[2]) if len(values) > 2 else 0,
-                        'pack_voltage_volts': round(pack_voltage_mv / 1000.0, 3) if isinstance(pack_voltage_mv, int) else pack_voltage_mv,
-                        'pack_voltage_mv': pack_voltage_mv,  # Deprecated, use pack_voltage_volts
+                        # The fourth value is the pack's nominal capacity in mAh
+                        # (it equals the capacity the BMS prints in its own
+                        # capacity messages), not a pack voltage: the voltage
+                        # keys are kept, as None.
+                        'pack_voltage_volts': None,
+                        'pack_voltage_mv': None,
+                        'nominal_capacity_mah': pack_voltage_mv,
                         'soc_percent_1': safe_int(values[4]) if len(values) > 4 else 0,
                         'soc_percent_2': safe_int(values[5]) if len(values) > 5 else 0,
                         'soc_percent_3': safe_int(values[6]) if len(values) > 6 else 0,
@@ -2390,8 +2396,11 @@ class Gen2:
                         'soc_raw_1': safe_int(values[0]),
                         'soc_raw_2': safe_int(values[1]),
                         'soc_raw_3': safe_int(values[2]),
-                        'pack_voltage_mv': pack_voltage_mv,
-                        'pack_voltage_volts': pack_voltage_mv / 1000.0 if isinstance(pack_voltage_mv, int) else pack_voltage_mv,
+                        # nominal capacity in mAh, not a pack voltage (see the
+                        # extended format above)
+                        'pack_voltage_mv': None,
+                        'pack_voltage_volts': None,
+                        'nominal_capacity_mah': pack_voltage_mv,
                         'soc_percent_1': safe_int(values[4]),
                         'soc_percent_2': safe_int(values[5]),
                         'soc_percent_3': safe_int(values[6]),
