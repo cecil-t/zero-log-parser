@@ -84,11 +84,11 @@ def test_no_initial_date_when_the_image_start_is_cut_off():
     assert found is not None and found['Initial date'] is None
 
 
-def test_uninitialized_serial_shown_as_stored_on_both_paths():
-    """UNINITIALIZED is what an unprogrammed board writes as its serial. The
-    standard path shows it as stored, and so does a shifted block that
-    passes every other check."""
+def test_uninitialized_serial_is_unknown_on_both_paths():
+    """UNINITIALIZED is what an unprogrammed board writes as its serial: the
+    firmware's not-set value, so Unknown, on the standard path and on a
+    shifted block that passes every other check."""
     for base in (0, 0x400):
         _, header, ld = parse(place(rev0_image(VIN_B, serial=b'UNINITIALIZED'), base))
-        assert header['Serial number'] == 'UNINITIALIZED'
+        assert header['Serial number'] == 'Unknown'
         assert header['VIN'] == VIN_B and ld.vin_source == 'header'

@@ -223,7 +223,7 @@ def test_real_coverage_gain_file_decodes_where_header_read_fails():
     assert fb[0].structured_data == {
         'vin': '538DZBZ80SC027736',
         'model': 'DSR',
-        'serial_number': 'UNINITIALIZED',
+        'serial_number': None,          # UNINITIALIZED: the firmware's not-set value
         'firmware_version': '40-08198',
         'board_rev': 3,
         'firmware_rev': 41,

@@ -1602,6 +1602,33 @@ class Gen2:
             'conditions': conditions,
         }
 
+    # Model codes the bikes write. Most are upper-case letters and digits;
+    # the regional variants carry an underscore.
+    KNOWN_MODELS = frozenset(['SR', 'SS', 'FX', 'FXS', 'FXE', 'FXP', 'DS', 'DSR', 'DSRBF', 'XU', 'NONE',
+                              'S11', 'DS11', 'FXS11', 'FXE11', 'SRF', 'SRS', 'DSRX',
+                              'S_A1', 'DS_A1', 'SR_A2', 'DSR_A2', 'S_AUS', 'DS_AUS'])
+    MODEL_CODE_RE = re.compile(r'[A-Z0-9_]+')
+    FIRMWARE_VERSION_RE = re.compile(r'[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*')
+    # The firmware's own not-set value for a board serial.
+    UNSET_SERIALS = frozenset(['UNINITIALIZED'])
+
+    @classmethod
+    def model_text(cls, value):
+        """A model field as read, or 'Unknown' unless it is a known model
+        code or upper-case letters, digits and underscores only (log text
+        fragments and binary bytes from a damaged header are not a model)."""
+        if isinstance(value, str) and (value in cls.KNOWN_MODELS or cls.MODEL_CODE_RE.fullmatch(value)):
+            return value
+        return 'Unknown'
+
+    @classmethod
+    def firmware_version_text(cls, value):
+        """A firmware version field as read ('40-08198'), or 'Unknown'
+        unless it is letters and digits in dash-separated groups."""
+        if isinstance(value, str) and value.isascii() and cls.FIRMWARE_VERSION_RE.fullmatch(value):
+            return value
+        return 'Unknown'
+
     @classmethod
     def mbb_system_information(cls, x):
         """Type 0xfb "System Information". LOG_STRUCTURE.md documents this
@@ -1659,19 +1686,21 @@ class Gen2:
 
         try:
             model = BinaryTools.unpack_str(x, 18 + shift, count=16)
-            structured_data['model'] = model if model and BinaryTools.is_printable(model) else 'Unknown'
+            structured_data['model'] = cls.model_text(model) if model and BinaryTools.is_printable(model) else 'Unknown'
         except Exception:
             structured_data['model'] = 'Unknown'
 
         try:
             serial = BinaryTools.unpack_str(x, 53 + shift, count=16)
             structured_data['serial_number'] = serial if serial and BinaryTools.is_printable(serial) else 'Unknown'
+            if serial in cls.UNSET_SERIALS:
+                structured_data['serial_number'] = None   # the firmware's not-set value
         except Exception:
             structured_data['serial_number'] = 'Unknown'
 
         try:
             fw_version = BinaryTools.unpack_str(x, 85 + shift, count=16)
-            structured_data['firmware_version'] = fw_version if fw_version and BinaryTools.is_printable(fw_version) else 'Unknown'
+            structured_data['firmware_version'] = cls.firmware_version_text(fw_version) if fw_version and BinaryTools.is_printable(fw_version) else 'Unknown'
         except Exception:
             structured_data['firmware_version'] = 'Unknown'
 
@@ -1686,7 +1715,7 @@ class Gen2:
             structured_data['firmware_rev'] = 'Unknown'
 
         conditions = 'VIN: {vin}, Serial: {serial}, Firmware: {fw}'.format(
-            vin=vin, serial=structured_data['serial_number'], fw=structured_data['firmware_version'])
+            vin=vin, serial=text_or_na(structured_data['serial_number']), fw=structured_data['firmware_version'])
 
         return {
             'event': 'System Information',
@@ -7711,6 +7740,13 @@ class LogData(object):
         # for the other header fields that cannot be read.
         if 'Initial date' in sys_info and not self.is_build_date_text(sys_info['Initial date']):
             sys_info['Initial date'] = 'Unknown'
+        # The model is a known model code or printable letters and digits;
+        # log text fragments and binary bytes from a damaged header are not.
+        if 'Model' in sys_info:
+            sys_info['Model'] = Gen2.model_text(sys_info['Model'])
+        # A serial the firmware never set reads UNINITIALIZED: not a serial.
+        if sys_info.get('Serial number') in Gen2.UNSET_SERIALS:
+            sys_info['Serial number'] = 'Unknown'
         self.vin_source = self.settle_vin(sys_info, header_vin)
 
         # log_info.platform: 'gen3' for files that start with an FST/Gen3

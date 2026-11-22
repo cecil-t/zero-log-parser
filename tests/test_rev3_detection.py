@@ -91,6 +91,10 @@ def build_classic_buffer(vin, vin_offset, total_len=0x40000, magic=b"MBB\x00"):
     buf[0:len(magic)] = magic
     buf[0x26:0x2a] = b"\xa1\xa1\xa1\xa1"
     buf[vin_offset:vin_offset + 17] = vin.encode("ascii")
+    # a model code where the classic layout keeps it (REV0 0x27f, REV1 0x26c)
+    model_offset = {0x240: 0x27f, 0x252: 0x26c}.get(vin_offset)
+    if model_offset is not None:
+        buf[model_offset:model_offset + 2] = b"SR"
     return bytes(buf)
 
 
