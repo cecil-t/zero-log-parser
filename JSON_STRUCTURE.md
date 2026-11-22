@@ -126,6 +126,7 @@ Each log entry follows this structure:
 | `uptime_s` | Seconds since the bike was switched on, when the raw value is one (`time_source` `"uptime"` or `"backfilled"`). Omitted otherwise |
 | `time_source` | Where the time came from, see below. `null` when the entry has no raw timestamp |
 | `time_repair` | `"page_marker"` on a Gen3 BMS entry whose clock value was rebuilt after the page marker overwrote its top bytes (see below). Omitted otherwise |
+| `time_note` | On some `invalid` entries, why there is no usable date: `"seam"` when the time bytes hold the event log header marker (`a2 a2`), so they come from the ring-buffer seam, not from a clock. The date fields are unchanged. Omitted otherwise |
 | `log_level` | Severity level: DATA, INFO, WARN, ERROR |
 | `event` | Descriptive name of the logged event |
 | `conditions` | Additional context or description (optional) |
