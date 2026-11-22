@@ -6896,6 +6896,34 @@ class LogData(object):
         self._processing_complete = False
         self._process_entries_eagerly()
 
+    # A file is not a Zero log when nothing identifies it as one (no board
+    # type, no platform, no VIN) and its entries are mostly noise: at least
+    # this share of them unknown entry types, and at least this share with an
+    # impossible date. Measured on every file of the logs collection: the
+    # non-Zero files (archives, images, other vendors' firmware) score 0.51 to
+    # 0.83 on both, real logs at most 0.29 and 0.14.
+    NOT_A_LOG_MIN_SHARE = 0.4
+
+    def require_zero_log(self):
+        """Raise UnreadableLogError when the decoded file is not a Zero log
+        (see NOT_A_LOG_MIN_SHARE)."""
+        if self.log_file.log_type != LogFile.log_type_unknown:
+            return
+        if (getattr(self, 'header_json_fields', None) or {}).get('platform') is not None \
+                or getattr(self, 'vin_source', None) is not None:
+            return
+        entries = self._get_processed_entries() or []
+        n = len(entries)
+        if not n:
+            return
+        unknown = sum(1 for e in entries if str(e.event).startswith(('Unknown Type', 'BMS Unknown Type')))
+        invalid = sum(1 for e in entries if e.time_source == 'invalid')
+        if unknown >= self.NOT_A_LOG_MIN_SHARE * n and invalid >= self.NOT_A_LOG_MIN_SHARE * n:
+            raise UnreadableLogError(
+                'Cannot decode %s: not a Zero log (no board type, platform or VIN, and %d of its %d '
+                'entries are unknown types with %d impossible dates)'
+                % (os.path.basename(self.log_file.file_path), unknown, n, invalid))
+
     def _process_entries_eagerly(self):
         """Process all entries immediately after LogData creation and cache results."""
         if self._processing_complete:
@@ -8508,6 +8536,7 @@ def parse_log(bin_file: str, output_file: str, tz_code=None, verbosity_level=1, 
 
     log = LogFile(bin_file)
     log_data = LogData(log, timezone_offset=timezone_offset, verbosity_level=verbosity_level)
+    log_data.require_zero_log()
 
     if output_format.lower() in ['csv', 'tsv']:
         # Generate CSV/TSV output
