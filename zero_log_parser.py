@@ -498,6 +498,13 @@ class BinaryTools:
         return cls.unpack(type_name, buff, address, count, offset)
 
     @staticmethod
+    def not_fill(value, *fills):
+        """value, or None when it is one of the given unwritten-fill raw
+        values (all bits set, or the signed maximum 0x7FFFFFFF the firmware
+        leaves in a field it never wrote)."""
+        return None if value is not None and value in fills else value
+
+    @staticmethod
     def le_fit(buff, start: int, length: int):
         """Little-endian unsigned integer of buff[start:start + length], or
         None when those bytes are not all inside buff (a slice would silently
@@ -1226,7 +1233,7 @@ class Gen2:
         # A field a short (damaged) record does not hold is None.
         fit = BinaryTools.unpack_fit
         low_mv, high_mv = fit('uint16', x, 0x0), fit('uint16', x, 0x02)
-        pack_mv = fit('uint32', x, 0x0b)
+        pack_mv = BinaryTools.not_fill(fit('uint32', x, 0x0b), 0xffffffff)
         mode_code = fit('uint8', x, 0x0f)
         structured_data = {
             'amp_hours': none_if_any_none(lambda v: trunc(v / 1000000.0), fit('uint32', x, 0x06)),
@@ -1334,7 +1341,7 @@ class Gen2:
             'PT': fit('int8', x, 0x04),
             'BT': fit('int8', x, 0x05),
             'SOC': fit('uint8', x, 0x0a),
-            'PV': none_if_any_none(lambda v: v / 1000.0, fit('uint32', x, 0x0b))  # Convert to volts
+            'PV': none_if_any_none(lambda v: v / 1000.0, BinaryTools.not_fill(fit('uint32', x, 0x0b), 0xffffffff))  # Convert to volts
         }
 
     @staticmethod
@@ -2662,7 +2669,7 @@ class Gen2:
         fit = BinaryTools.unpack_fit
         pack_temp_hi, pack_temp_low = cls.legacy_pack_temps(fit('int8', x, 0x0), fit('int8', x, 0x1))
         soc = fit('uint16', x, 0x2)
-        pack_voltage = none_if_any_none(convert_mv_to_v, fit('uint32', x, 0x4))
+        pack_voltage = none_if_any_none(convert_mv_to_v, BinaryTools.not_fill(fit('uint32', x, 0x4), 0x7fffffff, 0xffffffff))
         motor_temp = cls.legacy_temp(fit('int16', x, 0x8))
         controller_temp = cls.legacy_temp(fit('int16', x, 0xa))
         rpm = fit('uint16', x, 0xc)
@@ -2671,7 +2678,7 @@ class Gen2:
         mods = None if mods_raw is None else mod_translate.get(mods_raw, 'Unknown')
         motor_current = fit('int16', x, 0x13)
         ambient_temp = cls.legacy_temp(fit('int16', x, 0x15))
-        odometer = fit('uint32', x, 0x17)
+        odometer = BinaryTools.not_fill(fit('uint32', x, 0x17), 0xffffffff)
 
         # Build structured data dictionary
         structured_data = {
@@ -2732,7 +2739,7 @@ class Gen2:
         fit = BinaryTools.unpack_fit
         pack_temp_hi, pack_temp_low = cls.legacy_pack_temps(fit('int8', x, 0x00), fit('int8', x, 0x01))
         soc = fit('uint16', x, 0x02)
-        pack_voltage = none_if_any_none(convert_mv_to_v, fit('uint32', x, 0x4))
+        pack_voltage = none_if_any_none(convert_mv_to_v, BinaryTools.not_fill(fit('uint32', x, 0x4), 0x7fffffff, 0xffffffff))
         battery_current = fit('int8', x, 0x08)
         mods = fit('uint8', x, 0x0c)
         ambient_temp = cls.legacy_temp(fit('int8', x, 0x0d))
@@ -3749,7 +3756,9 @@ class Gen2:
             'battery_current_amps': current_ma / 1000.0,
         })
         if not short:
-            structured_data['pack_voltage_volts'] = none_if_any_none(lambda v: v / 1000.0, BinaryTools.le_fit(x, base + 25, 3))
+            # 0xFFFFFF (16777.215 V) is unwritten fill, not a voltage.
+            structured_data['pack_voltage_volts'] = none_if_any_none(
+                lambda v: v / 1000.0, BinaryTools.not_fill(BinaryTools.le_fit(x, base + 25, 3), 0xffffff))
 
         status, status_conditions = cls.bms_telemetry_status_fields(message_type, x)
         structured_data.update(status)
@@ -4650,7 +4659,7 @@ class Gen2:
             conditions += f", Vbat12:{text_or_na(data['battery_12v_volts'], '.2f')}V"
         if 'counter' in tail:
             at = tag_offset + tail['counter']
-            counter = BinaryTools.le_fit(x, at, 3)
+            counter = BinaryTools.not_fill(BinaryTools.le_fit(x, at, 3), 0xffffff)   # 0xFFFFFF: unwritten fill
             data['distance_km'] = none_if_any_none(lambda v: round(v * cls.TELEMETRY_DISTANCE_KM_PER_UNIT, 1), counter)
             conditions += f", Odo:{text_or_na(data['distance_km'], '.1f')}km"
         if 'speed' in tail:
@@ -5028,7 +5037,7 @@ class Gen2:
         fit = BinaryTools.unpack_fit
         pack_temp_hi, pack_temp_low = cls.legacy_pack_temps(fit('int8', x, 0x0), fit('int8', x, 0x1))
         soc = fit('uint16', x, 0x2)
-        pack_voltage = none_if_any_none(convert_mv_to_v, fit('uint32', x, 0x4))
+        pack_voltage = none_if_any_none(convert_mv_to_v, BinaryTools.not_fill(fit('uint32', x, 0x4), 0x7fffffff, 0xffffffff))
         motor_temp = cls.legacy_temp(fit('int16', x, 0x8))
         controller_temp = cls.legacy_temp(fit('int16', x, 0xa))
         rpm = fit('uint16', x, 0xc)
@@ -5041,7 +5050,7 @@ class Gen2:
         mods = fit('uint8', x, 0x12)
         motor_current = fit('int8', x, 0x13)
         ambient_temp = cls.legacy_temp(fit('int16', x, 0x15))
-        odometer = fit('uint32', x, 0x17)
+        odometer = BinaryTools.not_fill(fit('uint32', x, 0x17), 0xffffffff)
 
         # Build structured data dictionary
         structured_data = {
