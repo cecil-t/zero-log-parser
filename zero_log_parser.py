@@ -2658,8 +2658,7 @@ class Gen2:
         # temperature and odometer; a field the record does not hold is None,
         # not the 0 the zero padding would give.
         fit = BinaryTools.unpack_fit
-        pack_temp_hi = cls.legacy_temp(fit('int8', x, 0x0))
-        pack_temp_low = cls.legacy_temp(fit('int8', x, 0x1))
+        pack_temp_hi, pack_temp_low = cls.legacy_pack_temps(fit('int8', x, 0x0), fit('int8', x, 0x1))
         soc = fit('uint16', x, 0x2)
         pack_voltage = none_if_any_none(convert_mv_to_v, fit('uint32', x, 0x4))
         motor_temp = cls.legacy_temp(fit('int16', x, 0x8))
@@ -2729,8 +2728,7 @@ class Gen2:
         # Early firmware writes this record 13 bytes long, without ambient
         # temperature; a field the record does not hold is None.
         fit = BinaryTools.unpack_fit
-        pack_temp_hi = cls.legacy_temp(fit('int8', x, 0x00))
-        pack_temp_low = cls.legacy_temp(fit('int8', x, 0x01))
+        pack_temp_hi, pack_temp_low = cls.legacy_pack_temps(fit('int8', x, 0x00), fit('int8', x, 0x01))
         soc = fit('uint16', x, 0x02)
         pack_voltage = none_if_any_none(convert_mv_to_v, fit('uint32', x, 0x4))
         battery_current = fit('int8', x, 0x08)
@@ -4749,6 +4747,16 @@ class Gen2:
         return None if value == cls.LEGACY_MBB_NO_TEMP_C else value
 
     @classmethod
+    def legacy_pack_temps(cls, high_raw, low_raw):
+        """Classic MBB pack high / low temperatures. When the high reading
+        is the -100 C no-reading value, a low of 127 C (the largest signed
+        byte, never seen otherwise) is no reading either."""
+        high, low = cls.legacy_temp(high_raw), cls.legacy_temp(low_raw)
+        if high_raw == cls.LEGACY_MBB_NO_TEMP_C and low_raw == 127:
+            low = None
+        return high, low
+
+    @classmethod
     def battery_status(cls, x):
         opening_contactor = 'Opening Contactor'
         closing_contactor = 'Closing Contactor'
@@ -4988,8 +4996,7 @@ class Gen2:
         # The record is written at several lengths (one byte at the shortest);
         # a field the record does not hold is None.
         fit = BinaryTools.unpack_fit
-        pack_temp_hi = cls.legacy_temp(fit('int8', x, 0x0))
-        pack_temp_low = cls.legacy_temp(fit('int8', x, 0x1))
+        pack_temp_hi, pack_temp_low = cls.legacy_pack_temps(fit('int8', x, 0x0), fit('int8', x, 0x1))
         soc = fit('uint16', x, 0x2)
         pack_voltage = none_if_any_none(convert_mv_to_v, fit('uint32', x, 0x4))
         motor_temp = cls.legacy_temp(fit('int16', x, 0x8))

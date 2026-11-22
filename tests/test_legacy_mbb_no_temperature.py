@@ -41,3 +41,10 @@ def test_disable_temp_and_current_limited():
     assert sd['pack_temp_celsius'] is None
     sd = P[0x39](bytearray(struct.pack('<HHbH', 120, 3300, -100, 200)))['structured_data']
     assert sd['max_pack_temp_celsius'] is None
+
+
+def test_pack_low_127_with_no_high_reading():
+    sd = P[0x2c](_riding(ph=-100, pl=127))['structured_data']
+    assert sd['pack_temp_high_celsius'] is None and sd['pack_temp_low_celsius'] is None
+    # 127 next to a real high reading is left as decoded
+    assert P[0x2c](_riding(ph=30, pl=127))['structured_data']['pack_temp_low_celsius'] == 127
