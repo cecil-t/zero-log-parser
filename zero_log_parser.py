@@ -1329,8 +1329,10 @@ class Gen2:
             'B': none_if_any_none(lambda h, l: h - l, high_mv, low_mv),
             'L': none_if_any_none(lambda v: v / 1000.0, low_mv),  # Convert to volts
             'H': none_if_any_none(lambda v: v / 1000.0, high_mv),  # Convert to volts
-            'PT': fit('uint8', x, 0x04),
-            'BT': fit('uint8', x, 0x05),
+            # Signed bytes, as in the Discharge level record: below freezing
+            # they read 255..241 C as uint8.
+            'PT': fit('int8', x, 0x04),
+            'BT': fit('int8', x, 0x05),
             'SOC': fit('uint8', x, 0x0a),
             'PV': none_if_any_none(lambda v: v / 1000.0, fit('uint32', x, 0x0b))  # Convert to volts
         }
