@@ -479,6 +479,33 @@ class BinaryTools:
         else:
             return unpacked
 
+    @classmethod
+    def unpack_fit(cls,
+                   type_name: str,
+                   buff: bytearray,
+                   address: int,
+                   count=1, offset=0):
+        """unpack(), or None when the field does not lie wholly inside buff.
+
+        unpack() pads every buffer with zero bytes, so a field read beyond the
+        end of a short record decodes as 0 (or as a partial value) instead of
+        saying that the record never held it. Decoders of records that the
+        firmware writes at more than one length use this for every field: a
+        field the record holds decodes exactly as unpack() would."""
+        size = struct.calcsize('<{}{}'.format(count, cls.TYPES[type_name.lower()]))
+        if address + offset + size > len(buff):
+            return None
+        return cls.unpack(type_name, buff, address, count, offset)
+
+    @staticmethod
+    def le_fit(buff, start: int, length: int):
+        """Little-endian unsigned integer of buff[start:start + length], or
+        None when those bytes are not all inside buff (a slice would silently
+        return fewer bytes and a partial value)."""
+        if start < 0 or start + length > len(buff):
+            return None
+        return int.from_bytes(bytes(buff[start:start + length]), 'little')
+
     @staticmethod
     def unescape_block(data):
         start_offset = 0
@@ -783,6 +810,17 @@ def convert_mv_to_v(milli_volts: int) -> float:
 
 def convert_ratio_to_percent(numerator: Union[int, float], denominator: Union[int, float]) -> float:
     return numerator * 100 / denominator if denominator != 0 else 0
+
+
+def text_or_na(value, spec: str = '') -> str:
+    """Conditions-text form of a value that may be None (a field the record
+    does not hold): 'n/a', as the other conditions strings already print it."""
+    return 'n/a' if value is None else format(value, spec)
+
+
+def none_if_any_none(func, *values):
+    """func(*values), or None when any input is None."""
+    return None if any(v is None for v in values) else func(*values)
 
 
 def convert_bit_to_on_off(bit: int) -> str:
@@ -1185,41 +1223,46 @@ class Gen2:
             0x03: 'Idle'
         }
 
-        # Extract raw data once from binary
+        # A field a short (damaged) record does not hold is None.
+        fit = BinaryTools.unpack_fit
+        low_mv, high_mv = fit('uint16', x, 0x0), fit('uint16', x, 0x02)
+        pack_mv = fit('uint32', x, 0x0b)
+        mode_code = fit('uint8', x, 0x0f)
         structured_data = {
-            'amp_hours': trunc(BinaryTools.unpack('uint32', x, 0x06) / 1000000.0),
-            'state_of_charge_percent': BinaryTools.unpack('uint8', x, 0x0a),
-            'current_amps': trunc(BinaryTools.unpack('int32', x, 0x10) / 1000000.0),
-            'voltage_low_cell_volts': BinaryTools.unpack('uint16', x, 0x0) / 1000.0,
-            'voltage_unloaded_cell_volts': BinaryTools.unpack('uint16', x, 0x14) / 1000.0,
-            'voltage_high_cell_volts': BinaryTools.unpack('uint16', x, 0x02) / 1000.0,
-            'voltage_balance_mv': BinaryTools.unpack('uint16', x, 0x02) - BinaryTools.unpack('uint16', x, 0x0),
+            'amp_hours': none_if_any_none(lambda v: trunc(v / 1000000.0), fit('uint32', x, 0x06)),
+            'state_of_charge_percent': fit('uint8', x, 0x0a),
+            'current_amps': none_if_any_none(lambda v: trunc(v / 1000000.0), fit('int32', x, 0x10)),
+            'voltage_low_cell_volts': none_if_any_none(lambda v: v / 1000.0, low_mv),
+            'voltage_unloaded_cell_volts': none_if_any_none(lambda v: v / 1000.0, fit('uint16', x, 0x14)),
+            'voltage_high_cell_volts': none_if_any_none(lambda v: v / 1000.0, high_mv),
+            'voltage_balance_mv': none_if_any_none(lambda h, l: h - l, high_mv, low_mv),
             # Pack and BMS board temperatures are signed bytes: below freezing
             # they read 255..242 C as uint8. The negative pack values match the
             # MBB's own (signed) pack temperatures on the same bike at the same
             # time. analysis/legacy_mbb_disarmed_current.md.
-            'pack_temp_celsius': BinaryTools.unpack('int8', x, 0x04),
-            'bms_temp_celsius': BinaryTools.unpack('int8', x, 0x05),
-            'pack_voltage_volts': BinaryTools.unpack('uint32', x, 0x0b) / 1000.0,
-            'pack_voltage_mv': BinaryTools.unpack('uint32', x, 0x0b),  # For backward compatibility
-            'mode': bike_states.get(BinaryTools.unpack('uint8', x, 0x0f))
+            'pack_temp_celsius': fit('int8', x, 0x04),
+            'bms_temp_celsius': fit('int8', x, 0x05),
+            'pack_voltage_volts': none_if_any_none(lambda v: v / 1000.0, pack_mv),
+            'pack_voltage_mv': pack_mv,  # For backward compatibility
+            'mode': None if mode_code is None else bike_states.get(mode_code)
         }
 
         # Generate legacy conditions string for backward compatibility
+        sd = structured_data
         legacy_conditions = (
-            '{AH:03.0f} AH, SOC:{SOC:3d}%, I:{I:3.0f}A, L:{L:4.2f}V, l:{l:4.2f}V, H:{H:4.2f}V, B:{B:03d}mV, '
-            'PT:{PT:03d}C, BT:{BT:03d}C, PV:{PV:6.1f}V, M:{M}').format(
-                AH=structured_data['amp_hours'],
-                SOC=structured_data['state_of_charge_percent'],
-                I=structured_data['current_amps'],
-                L=structured_data['voltage_low_cell_volts'],
-                l=structured_data['voltage_unloaded_cell_volts'],
-                H=structured_data['voltage_high_cell_volts'],
-                B=structured_data['voltage_balance_mv'],
-                PT=structured_data['pack_temp_celsius'],
-                BT=structured_data['bms_temp_celsius'],
-                PV=structured_data['pack_voltage_volts'],
-                M=structured_data['mode']
+            '{AH} AH, SOC:{SOC}%, I:{I}A, L:{L}V, l:{l}V, H:{H}V, B:{B}mV, '
+            'PT:{PT}C, BT:{BT}C, PV:{PV}V, M:{M}').format(
+                AH=text_or_na(sd['amp_hours'], '03.0f'),
+                SOC=text_or_na(sd['state_of_charge_percent'], '3d'),
+                I=text_or_na(sd['current_amps'], '3.0f'),
+                L=text_or_na(sd['voltage_low_cell_volts'], '4.2f'),
+                l=text_or_na(sd['voltage_unloaded_cell_volts'], '4.2f'),
+                H=text_or_na(sd['voltage_high_cell_volts'], '4.2f'),
+                B=text_or_na(sd['voltage_balance_mv'], '03d'),
+                PT=text_or_na(sd['pack_temp_celsius'], '03d'),
+                BT=text_or_na(sd['bms_temp_celsius'], '03d'),
+                PV=text_or_na(sd['pack_voltage_volts'], '6.1f'),
+                M=sd['mode']
             )
 
         return {
@@ -1278,16 +1321,29 @@ class Gen2:
 
     @classmethod
     def bms_charge_event_fields(cls, x):
+        # A field a short (damaged) record does not hold is None.
+        fit = BinaryTools.unpack_fit
+        low_mv, high_mv = fit('uint16', x, 0x00), fit('uint16', x, 0x02)
         return {
-            'AH': trunc(BinaryTools.unpack('uint32', x, 0x06) / 1000000.0),
-            'B': BinaryTools.unpack('uint16', x, 0x02) - BinaryTools.unpack('uint16', x, 0x0),
-            'L': BinaryTools.unpack('uint16', x, 0x00) / 1000.0,  # Convert to volts
-            'H': BinaryTools.unpack('uint16', x, 0x02) / 1000.0,  # Convert to volts
-            'PT': BinaryTools.unpack('uint8', x, 0x04),
-            'BT': BinaryTools.unpack('uint8', x, 0x05),
-            'SOC': BinaryTools.unpack('uint8', x, 0x0a),
-            'PV': BinaryTools.unpack('uint32', x, 0x0b) / 1000.0  # Convert to volts
+            'AH': none_if_any_none(lambda v: trunc(v / 1000000.0), fit('uint32', x, 0x06)),
+            'B': none_if_any_none(lambda h, l: h - l, high_mv, low_mv),
+            'L': none_if_any_none(lambda v: v / 1000.0, low_mv),  # Convert to volts
+            'H': none_if_any_none(lambda v: v / 1000.0, high_mv),  # Convert to volts
+            'PT': fit('uint8', x, 0x04),
+            'BT': fit('uint8', x, 0x05),
+            'SOC': fit('uint8', x, 0x0a),
+            'PV': none_if_any_none(lambda v: v / 1000.0, fit('uint32', x, 0x0b))  # Convert to volts
         }
+
+    @staticmethod
+    def bms_charge_event_conditions(fields, soc_spec):
+        """Conditions text of Charged To Full / Discharged To Low."""
+        f = fields
+        return ('{AH} AH, SOC:{SOC}%,         L:{L}V,         H:{H}V, B:{B}mV, '
+                'PT:{PT}C, BT:{BT}C, PV:{PV}V').format(
+            AH=text_or_na(f['AH'], '03.0f'), SOC=text_or_na(f['SOC'], soc_spec),
+            L=text_or_na(f['L'], '4.2f'), H=text_or_na(f['H'], '4.2f'), B=text_or_na(f['B'], '03d'),
+            PT=text_or_na(f['PT'], '03d'), BT=text_or_na(f['BT'], '03d'), PV=text_or_na(f['PV'], '6.1f'))
 
     @classmethod
     def bms_charge_full(cls, x):
@@ -1308,9 +1364,7 @@ class Gen2:
         }
 
         # Generate legacy conditions string for backward compatibility
-        legacy_conditions = (
-            '{AH:03.0f} AH, SOC: {SOC}%,         L:{L:4.2f}V,         H:{H:4.2f}V, B:{B:03d}mV, '
-            'PT:{PT:03d}C, BT:{BT:03d}C, PV:{PV:6.1f}V').format_map(fields)
+        legacy_conditions = cls.bms_charge_event_conditions(fields, '').replace('SOC:', 'SOC: ', 1)
 
         return {
             'event': 'Charged To Full',
@@ -1337,9 +1391,7 @@ class Gen2:
         }
 
         # Generate legacy conditions string for backward compatibility
-        legacy_conditions = (
-            '{AH:03.0f} AH, SOC:{SOC:3d}%,         L:{L:4.2f}V,         H:{H:4.2f}V, B:{B:03d}mV, '
-            'PT:{PT:03d}C, BT:{BT:03d}C, PV:{PV:6.1f}V').format_map(fields)
+        legacy_conditions = cls.bms_charge_event_conditions(fields, '3d')
 
         return {
             'event': 'Discharged To Low',
@@ -1356,11 +1408,12 @@ class Gen2:
     @classmethod
     def bms_soc_adj_voltage(cls, x):
         # Extract binary data once
-        old_uah = BinaryTools.unpack('uint32', x, 0x00)
-        old_soc = BinaryTools.unpack('uint8', x, 0x04)
-        new_uah = BinaryTools.unpack('uint32', x, 0x05)
-        new_soc = BinaryTools.unpack('uint8', x, 0x09)
-        low_cell_mv = BinaryTools.unpack('uint16', x, 0x0a)
+        fit = BinaryTools.unpack_fit
+        old_uah = fit('uint32', x, 0x00)
+        old_soc = fit('uint8', x, 0x04)
+        new_uah = fit('uint32', x, 0x05)
+        new_soc = fit('uint8', x, 0x09)
+        low_cell_mv = fit('uint16', x, 0x0a)
 
         # Build structured data
         structured_data = {
@@ -1369,17 +1422,17 @@ class Gen2:
             'new_capacity_microamp_hours': new_uah,
             'new_state_of_charge_percent': new_soc,
             'low_cell_voltage_millivolts': low_cell_mv,
-            'capacity_change_microamp_hours': new_uah - old_uah,
-            'soc_change_percent': new_soc - old_soc
+            'capacity_change_microamp_hours': none_if_any_none(lambda n, o: n - o, new_uah, old_uah),
+            'soc_change_percent': none_if_any_none(lambda n, o: n - o, new_soc, old_soc)
         }
 
         # Generate legacy conditions string for backward compatibility
         legacy_conditions = ('old:   {old}uAH (soc:{old_soc}%), '
                            'new:   {new}uAH (soc:{new_soc}%), '
                            'low cell: {low} mV').format(
-                              old=old_uah, old_soc=old_soc,
-                              new=new_uah, new_soc=new_soc,
-                              low=low_cell_mv)
+                              old=text_or_na(old_uah), old_soc=text_or_na(old_soc),
+                              new=text_or_na(new_uah), new_soc=text_or_na(new_soc),
+                              low=text_or_na(low_cell_mv))
 
         return {
             'event': 'SOC adjusted for voltage',
@@ -1390,23 +1443,24 @@ class Gen2:
     @classmethod
     def bms_curr_sens_zero(cls, x):
         # Extract binary data once
-        old_mv = BinaryTools.unpack('uint16', x, 0x00)
-        new_mv = BinaryTools.unpack('uint16', x, 0x02)
-        corrfact = BinaryTools.unpack('uint8', x, 0x04)
+        fit = BinaryTools.unpack_fit
+        old_mv = fit('uint16', x, 0x00)
+        new_mv = fit('uint16', x, 0x02)
+        corrfact = fit('uint8', x, 0x04)
 
         # Build structured data
         structured_data = {
             'old_value_millivolts': old_mv,
             'new_value_millivolts': new_mv,
             'correction_factor': corrfact,
-            'old_value_volts': old_mv / 1000.0,
-            'new_value_volts': new_mv / 1000.0,
-            'adjustment_millivolts': new_mv - old_mv
+            'old_value_volts': none_if_any_none(lambda v: v / 1000.0, old_mv),
+            'new_value_volts': none_if_any_none(lambda v: v / 1000.0, new_mv),
+            'adjustment_millivolts': none_if_any_none(lambda n, o: n - o, new_mv, old_mv)
         }
 
         # Generate legacy conditions string for backward compatibility
         legacy_conditions = 'old: {old}mV, new: {new}mV, corrfact: {corrfact}'.format(
-            old=old_mv, new=new_mv, corrfact=corrfact
+            old=text_or_na(old_mv), new=text_or_na(new_mv), corrfact=text_or_na(corrfact)
         )
 
         return {
@@ -1666,16 +1720,20 @@ class Gen2:
     @classmethod
     def bms_contactor_state(cls, x):
         # Extract raw binary data once into structured format
+        # A field a short (damaged) record does not hold is None. The state
+        # byte itself names the event, so a record without it keeps the old
+        # reading of the padding (Opened); it is not a value.
+        fit = BinaryTools.unpack_fit
         is_closed = BinaryTools.unpack('bool', x, 0x0)
-        pack_voltage = BinaryTools.unpack('uint32', x, 0x01)
-        switched_voltage = BinaryTools.unpack('uint32', x, 0x05)
-        discharge_current = BinaryTools.unpack('int32', x, 0x09)
+        pack_voltage = fit('uint32', x, 0x01)
+        switched_voltage = fit('uint32', x, 0x05)
+        discharge_current = fit('int32', x, 0x09)
 
         # Convert to display units
-        pack_voltage_v = pack_voltage / 1000.0
-        switched_voltage_v = switched_voltage / 1000.0
-        discharge_current_a = discharge_current / 1000.0
-        precharge_percent = convert_ratio_to_percent(switched_voltage, pack_voltage)
+        pack_voltage_v = none_if_any_none(lambda v: v / 1000.0, pack_voltage)
+        switched_voltage_v = none_if_any_none(lambda v: v / 1000.0, switched_voltage)
+        discharge_current_a = none_if_any_none(lambda v: v / 1000.0, discharge_current)
+        precharge_percent = none_if_any_none(convert_ratio_to_percent, switched_voltage, pack_voltage)
 
         # Build structured data dictionary
         structured_data = {
@@ -1691,14 +1749,14 @@ class Gen2:
 
         # Generate legacy conditions string for backward compatibility
         legacy_conditions = (
-            'Pack V: {pv:6.1f}V, '
-            'Switched V: {sv:6.1f}V, '
-            'Prechg Pct: {pc:2.0f}%, '
-            'Dischg Cur: {dc:4.0f}A').format(
-                pv=pack_voltage_v,
-                sv=switched_voltage_v,
-                pc=precharge_percent,
-                dc=discharge_current_a)
+            'Pack V: {pv}V, '
+            'Switched V: {sv}V, '
+            'Prechg Pct: {pc}%, '
+            'Dischg Cur: {dc}A').format(
+                pv=text_or_na(pack_voltage_v, '6.1f'),
+                sv=text_or_na(switched_voltage_v, '6.1f'),
+                pc=text_or_na(precharge_percent, '2.0f'),
+                dc=text_or_na(discharge_current_a, '4.0f'))
 
         return {
             'event': 'Contactor was ' + ('Closed' if is_closed else 'Opened'),
@@ -1709,18 +1767,18 @@ class Gen2:
     @classmethod
     def bms_discharge_cut(cls, x):
         # Extract binary data once
-        cut_byte = BinaryTools.unpack('uint8', x, 0x00)
-        cut_pct = round((cut_byte / 255) * 100)  # JS parser formula
+        cut_byte = BinaryTools.unpack_fit('uint8', x, 0x00)
+        cut_pct = none_if_any_none(lambda v: round((v / 255) * 100), cut_byte)  # JS parser formula
 
         # Build structured data
         structured_data = {
             'cutback_percent': cut_pct,
             'cutback_raw_value': cut_byte,
-            'cutback_ratio': cut_byte / 255.0
+            'cutback_ratio': none_if_any_none(lambda v: v / 255.0, cut_byte)
         }
 
         # Generate legacy conditions string for backward compatibility
-        legacy_conditions = '{cut:2d}%'.format(cut=cut_pct)
+        legacy_conditions = '{cut}%'.format(cut=text_or_na(cut_pct, '2d'))
 
         return {
             'event': 'Discharge Cutback',
@@ -1731,13 +1789,14 @@ class Gen2:
     @classmethod
     def bms_contactor_drive(cls, x):
         # Extract binary data once
-        pack_voltage_raw = BinaryTools.unpack('uint32', x, 0x01)
-        switched_voltage_raw = BinaryTools.unpack('uint32', x, 0x05)
-        duty_cycle = BinaryTools.unpack('uint8', x, 0x09)
+        fit = BinaryTools.unpack_fit
+        pack_voltage_raw = fit('uint32', x, 0x01)
+        switched_voltage_raw = fit('uint32', x, 0x05)
+        duty_cycle = fit('uint8', x, 0x09)
 
         # Convert millivolts to volts for display
-        pack_voltage_v = pack_voltage_raw / 1000.0
-        switched_voltage_v = switched_voltage_raw / 1000.0
+        pack_voltage_v = none_if_any_none(lambda v: v / 1000.0, pack_voltage_raw)
+        switched_voltage_v = none_if_any_none(lambda v: v / 1000.0, switched_voltage_raw)
 
         # Build structured data
         structured_data = {
@@ -1746,14 +1805,14 @@ class Gen2:
             'duty_cycle_percent': duty_cycle,
             'pack_voltage_millivolts': pack_voltage_raw,
             'switched_voltage_millivolts': switched_voltage_raw,
-            'voltage_difference_volts': abs(pack_voltage_v - switched_voltage_v)
+            'voltage_difference_volts': none_if_any_none(lambda a, b: abs(a - b), pack_voltage_v, switched_voltage_v)
         }
 
         # Generate legacy conditions string for backward compatibility
-        legacy_conditions = 'Pack V: {pv:6.1f}V, Switched V: {sv:6.1f}V, Duty Cycle: {dc}%'.format(
-            pv=pack_voltage_v,
-            sv=switched_voltage_v,
-            dc=duty_cycle
+        legacy_conditions = 'Pack V: {pv}V, Switched V: {sv}V, Duty Cycle: {dc}%'.format(
+            pv=text_or_na(pack_voltage_v, '6.1f'),
+            sv=text_or_na(switched_voltage_v, '6.1f'),
+            dc=text_or_na(duty_cycle)
         )
 
         return {
@@ -2592,19 +2651,23 @@ class Gen2:
         # them with ldrsb in Riding, Charging and Disarmed alike): below
         # freezing, and the -100 C invalid-thermistor value, read as uint8
         # gave 156..255 C. analysis/legacy_mbb_disarmed_current.md.
-        pack_temp_hi = BinaryTools.unpack('int8', x, 0x0)
-        pack_temp_low = BinaryTools.unpack('int8', x, 0x1)
-        soc = BinaryTools.unpack('uint16', x, 0x2)
-        pack_voltage = convert_mv_to_v(BinaryTools.unpack('uint32', x, 0x4))
-        motor_temp = BinaryTools.unpack('int16', x, 0x8)
-        controller_temp = BinaryTools.unpack('int16', x, 0xa)
-        rpm = BinaryTools.unpack('uint16', x, 0xc)
-        battery_current = BinaryTools.unpack('int16', x, 0x10)
-        mods_raw = BinaryTools.unpack('uint8', x, 0x12)
-        mods = mod_translate.get(mods_raw, 'Unknown')
-        motor_current = BinaryTools.unpack('int16', x, 0x13)
-        ambient_temp = BinaryTools.unpack('int16', x, 0x15)
-        odometer = BinaryTools.unpack('uint32', x, 0x17)
+        # Early firmware writes this record 21 bytes long, without ambient
+        # temperature and odometer; a field the record does not hold is None,
+        # not the 0 the zero padding would give.
+        fit = BinaryTools.unpack_fit
+        pack_temp_hi = fit('int8', x, 0x0)
+        pack_temp_low = fit('int8', x, 0x1)
+        soc = fit('uint16', x, 0x2)
+        pack_voltage = none_if_any_none(convert_mv_to_v, fit('uint32', x, 0x4))
+        motor_temp = fit('int16', x, 0x8)
+        controller_temp = fit('int16', x, 0xa)
+        rpm = fit('uint16', x, 0xc)
+        battery_current = fit('int16', x, 0x10)
+        mods_raw = fit('uint8', x, 0x12)
+        mods = None if mods_raw is None else mod_translate.get(mods_raw, 'Unknown')
+        motor_current = fit('int16', x, 0x13)
+        ambient_temp = fit('int16', x, 0x15)
+        odometer = fit('uint32', x, 0x17)
 
         # Build structured data dictionary
         structured_data = {
@@ -2626,26 +2689,26 @@ class Gen2:
         # Generate legacy conditions string for backward compatibility
         legacy_conditions = (
             'PackTemp: h {pack_temp_hi}C, l {pack_temp_low}C, '
-            'PackSOC:{soc:3d}%, '
-            'Vpack:{pack_voltage:7.3f}V, '
-            'MotAmps:{motor_current:4d}, BattAmps:{battery_current:4d}, '
+            'PackSOC:{soc}%, '
+            'Vpack:{pack_voltage}V, '
+            'MotAmps:{motor_current}, BattAmps:{battery_current}, '
             'Mods: {mods}, '
-            'MotTemp:{motor_temp:4d}C, CtrlTemp:{controller_temp:4d}C, '
-            'AmbTemp:{ambient_temp:4d}C, '
-            'MotRPM:{rpm:4d}, '
-            'Odo:{odometer:5d}km').format(
-                pack_temp_hi=pack_temp_hi,
-                pack_temp_low=pack_temp_low,
-                soc=soc,
-                pack_voltage=pack_voltage,
-                motor_temp=motor_temp,
-                controller_temp=controller_temp,
-                rpm=rpm,
-                battery_current=battery_current,
-                mods=mods,
-                motor_current=motor_current,
-                ambient_temp=ambient_temp,
-                odometer=odometer)
+            'MotTemp:{motor_temp}C, CtrlTemp:{controller_temp}C, '
+            'AmbTemp:{ambient_temp}C, '
+            'MotRPM:{rpm}, '
+            'Odo:{odometer}km').format(
+                pack_temp_hi=text_or_na(pack_temp_hi),
+                pack_temp_low=text_or_na(pack_temp_low),
+                soc=text_or_na(soc, '3d'),
+                pack_voltage=text_or_na(pack_voltage, '7.3f'),
+                motor_temp=text_or_na(motor_temp, '4d'),
+                controller_temp=text_or_na(controller_temp, '4d'),
+                rpm=text_or_na(rpm, '4d'),
+                battery_current=text_or_na(battery_current, '4d'),
+                mods=text_or_na(mods),
+                motor_current=text_or_na(motor_current, '4d'),
+                ambient_temp=text_or_na(ambient_temp, '4d'),
+                odometer=text_or_na(odometer, '5d'))
 
         return {
             'event': 'Riding',
@@ -2660,18 +2723,21 @@ class Gen2:
         # them with ldrsb in Riding, Charging and Disarmed alike): below
         # freezing, and the -100 C invalid-thermistor value, read as uint8
         # gave 156..255 C. analysis/legacy_mbb_disarmed_current.md.
-        pack_temp_hi = BinaryTools.unpack('int8', x, 0x00)
-        pack_temp_low = BinaryTools.unpack('int8', x, 0x01)
-        soc = BinaryTools.unpack('uint16', x, 0x02)
-        pack_voltage = convert_mv_to_v(BinaryTools.unpack('uint32', x, 0x4))
-        battery_current = BinaryTools.unpack('int8', x, 0x08)
-        mods = BinaryTools.unpack('uint8', x, 0x0c)
-        ambient_temp = BinaryTools.unpack('int8', x, 0x0d)
+        # Early firmware writes this record 13 bytes long, without ambient
+        # temperature; a field the record does not hold is None.
+        fit = BinaryTools.unpack_fit
+        pack_temp_hi = fit('int8', x, 0x00)
+        pack_temp_low = fit('int8', x, 0x01)
+        soc = fit('uint16', x, 0x02)
+        pack_voltage = none_if_any_none(convert_mv_to_v, fit('uint32', x, 0x4))
+        battery_current = fit('int8', x, 0x08)
+        mods = fit('uint8', x, 0x0c)
+        ambient_temp = fit('int8', x, 0x0d)
         # MbbChgEn: the firmware renderer prints Yes when byte 0x0a is non-zero
         # and No when it is zero. It is 0 while charging pauses (current ~0 A,
-        # SOC flat) and 1 while the battery takes charge. A payload too short to
-        # hold the byte keeps the old fixed Yes. analysis/legacy_mbb_disarmed_current.md.
-        mbb_charge_enabled = bool(x[0x0a]) if len(x) > 0x0a else True
+        # SOC flat) and 1 while the battery takes charge. None when the record
+        # is too short to hold the byte. analysis/legacy_mbb_disarmed_current.md.
+        mbb_charge_enabled = bool(x[0x0a]) if len(x) > 0x0a else None
 
         # Build structured data dictionary
         structured_data = {
@@ -2689,16 +2755,16 @@ class Gen2:
         # Generate legacy conditions string for backward compatibility
         legacy_conditions = (
             'PackTemp: h {pack_temp_hi}C, l {pack_temp_low}C, AmbTemp: {ambient_temp}C, '
-            'PackSOC:{soc:3d}%, Vpack:{pack_voltage:7.3f}V, BattAmps: {battery_current:3d}, '
-            'Mods: {mods:02b}, MbbChgEn: {mbb_chg_en}, BmsChgEn: No').format(
-                pack_temp_hi=pack_temp_hi,
-                pack_temp_low=pack_temp_low,
-                ambient_temp=ambient_temp,
-                soc=soc,
-                pack_voltage=pack_voltage,
-                battery_current=battery_current,
-                mods=mods,
-                mbb_chg_en='Yes' if mbb_charge_enabled else 'No')
+            'PackSOC:{soc}%, Vpack:{pack_voltage}V, BattAmps: {battery_current}, '
+            'Mods: {mods}, MbbChgEn: {mbb_chg_en}, BmsChgEn: No').format(
+                pack_temp_hi=text_or_na(pack_temp_hi),
+                pack_temp_low=text_or_na(pack_temp_low),
+                ambient_temp=text_or_na(ambient_temp),
+                soc=text_or_na(soc, '3d'),
+                pack_voltage=text_or_na(pack_voltage, '7.3f'),
+                battery_current=text_or_na(battery_current, '3d'),
+                mods=text_or_na(mods, '02b'),
+                mbb_chg_en='n/a' if mbb_charge_enabled is None else ('Yes' if mbb_charge_enabled else 'No'))
 
         return {
             'event': 'Charging',
@@ -2715,19 +2781,23 @@ class Gen2:
         }
 
         # Extract binary data once
-        error_code = BinaryTools.unpack('uint16', x, 0x00)
-        sevcon_code = BinaryTools.unpack('uint16', x, 0x02)
-        error_reg = BinaryTools.unpack('uint8', x, 0x04)
+        fit = BinaryTools.unpack_fit
+        error_code = fit('uint16', x, 0x00)
+        sevcon_code = fit('uint16', x, 0x02)
+        error_reg = fit('uint8', x, 0x04)
         additional_data = x[5:] if len(x) > 5 else []
+
+        def hex_or_none(value, width):
+            return None if value is None else f'0x{value:0{width}X}'
 
         # Build structured data
         structured_data = {
             'error_code': error_code,
-            'error_code_hex': f'0x{error_code:04X}',
+            'error_code_hex': hex_or_none(error_code, 4),
             'sevcon_error_code': sevcon_code,
-            'sevcon_error_code_hex': f'0x{sevcon_code:04X}',
+            'sevcon_error_code_hex': hex_or_none(sevcon_code, 4),
             'error_register': error_reg,
-            'error_register_hex': f'0x{error_reg:02X}',
+            'error_register_hex': hex_or_none(error_reg, 2),
             'additional_data_hex': [f'{c:02X}' for c in additional_data],
             'additional_data_raw': list(additional_data),
             'cause': cause.get(sevcon_code, 'Unknown'),
@@ -2735,11 +2805,11 @@ class Gen2:
         }
 
         # Generate legacy conditions string for backward compatibility
-        legacy_conditions = ('Error Code: 0x{code:04X}, Error Reg: 0x{reg:02X}, '
-                           'Sevcon Error Code: 0x{sevcon_code:04X}, Data: {data}, {cause}').format(
-                              code=error_code,
-                              reg=error_reg,
-                              sevcon_code=sevcon_code,
+        legacy_conditions = ('Error Code: {code}, Error Reg: {reg}, '
+                           'Sevcon Error Code: {sevcon_code}, Data: {data}, {cause}').format(
+                              code=hex_or_none(error_code, 4) or 'n/a',
+                              reg=hex_or_none(error_reg, 2) or 'n/a',
+                              sevcon_code=hex_or_none(sevcon_code, 4) or 'n/a',
                               data=' '.join([f'{c:02X}' for c in additional_data]),
                               cause=cause.get(sevcon_code, 'Unknown')
                           )
@@ -3542,7 +3612,7 @@ class Gen2:
         # Evidence: analysis/coverage_rebaseline_damaged.md, Part 2C.
         status_word_bytes = bytes(x[26 + shift:30 + shift])
         data['bms_status_word'] = None if all(b in sentinels for b in status_word_bytes) else \
-            int.from_bytes(status_word_bytes, 'little')
+            BinaryTools.le_fit(x, 26 + shift, 4)
 
         if key in cls.BMS_STATUS_LONG_VARIANTS:
             # 0xFF is a real value here (under load), so only 0xF0 reads as no
@@ -3589,8 +3659,8 @@ class Gen2:
             for name, at in zip(('full_charge_capacity_ah', 'full_charge_capacity_twin_ah'),
                                 cls.BMS_CAPACITY_OFFSETS[key]):
                 raw = bytes(x[at:at + 3])
-                data[name] = None if raw in (b'\xf0\xf0\xf0', b'\xff\xff\xff') else \
-                    int.from_bytes(raw, 'little') / 1000.0
+                value = BinaryTools.le_fit(x, at, 3)
+                data[name] = None if value is None or raw in (b'\xf0\xf0\xf0', b'\xff\xff\xff') else value / 1000.0
 
         if key in cls.BMS_CHARGE_LIMIT_OFFSETS:
             limit = BinaryTools.unpack('uint16', x, cls.BMS_CHARGE_LIMIT_OFFSETS[key])
@@ -3669,7 +3739,7 @@ class Gen2:
             'battery_current_amps': current_ma / 1000.0,
         })
         if not short:
-            structured_data['pack_voltage_volts'] = int.from_bytes(bytes(x[base + 25:base + 28]), 'little') / 1000.0
+            structured_data['pack_voltage_volts'] = none_if_any_none(lambda v: v / 1000.0, BinaryTools.le_fit(x, base + 25, 3))
 
         status, status_conditions = cls.bms_telemetry_status_fields(message_type, x)
         structured_data.update(status)
@@ -3677,7 +3747,7 @@ class Gen2:
 
         conditions = (
             f"SOC:{soc}%, Vlow:{voltage_low}mV, Vhigh:{voltage_high}mV, "
-            + (f"Vpack:{structured_data['pack_voltage_volts']:.3f}V, " if not short else '')
+            + (f"Vpack:{text_or_na(structured_data['pack_voltage_volts'], '.3f')}V, " if not short else '')
             + f"I:{structured_data['battery_current_amps']:.3f}A"
         )
         if status_conditions:
@@ -4512,7 +4582,7 @@ class Gen2:
         def temperature(name, value):
             return None if name in failed else value
 
-        dc_bus_mv = int.from_bytes(bytes(x[tag_offset - 21:tag_offset - 18]), 'little')
+        dc_bus_mv = BinaryTools.le_fit(x, tag_offset - 21, 3)
         dc_bus_ma = BinaryTools.unpack('int32', x, tag_offset - 17)
         rpm = BinaryTools.unpack('uint16', x, tag_offset - 13)
         # The five temperatures are signed 32-bit words (tag+9, +13, +17, +21,
@@ -4533,7 +4603,7 @@ class Gen2:
             'motor_controller_data_valid': controller_ok,
             'bms_data_valid': bms_ok,
             'temp_flags': temp_flags,
-            'dc_bus_voltage_volts': ctl(dc_bus_mv / 1000.0),
+            'dc_bus_voltage_volts': ctl(none_if_any_none(lambda v: v / 1000.0, dc_bus_mv)),
             'dc_bus_current_amps': ctl(dc_bus_ma / cls.telemetry_dc_bus_current_divisor(entry_rev)),
             'motor_rpm': ctl(rpm),
             'ambient_temperature_c': temperature('ambient_temperature_c', ambient),
@@ -4557,14 +4627,14 @@ class Gen2:
 
         tail = cls.TELEMETRY_TAIL_FIELDS.get((message_type, len(x)), {})
         if 'aux' in tail:
-            aux_uv = int.from_bytes(bytes(x[tag_offset + tail['aux']:tag_offset + tail['aux'] + 3]), 'little')
-            data['battery_12v_volts'] = aux_uv / 1e6
-            conditions += f", Vbat12:{aux_uv / 1e6:.2f}V"
+            aux_uv = BinaryTools.le_fit(x, tag_offset + tail['aux'], 3)
+            data['battery_12v_volts'] = none_if_any_none(lambda v: v / 1e6, aux_uv)
+            conditions += f", Vbat12:{text_or_na(data['battery_12v_volts'], '.2f')}V"
         if 'counter' in tail:
             at = tag_offset + tail['counter']
-            counter = int.from_bytes(bytes(x[at:at + 3]), 'little')
-            data['distance_km'] = round(counter * cls.TELEMETRY_DISTANCE_KM_PER_UNIT, 1)
-            conditions += f", Odo:{data['distance_km']:.1f}km"
+            counter = BinaryTools.le_fit(x, at, 3)
+            data['distance_km'] = none_if_any_none(lambda v: round(v * cls.TELEMETRY_DISTANCE_KM_PER_UNIT, 1), counter)
+            conditions += f", Odo:{text_or_na(data['distance_km'], '.1f')}km"
         if 'speed' in tail:
             speed_mm_h = BinaryTools.unpack('int32', x, tag_offset + tail['speed'])
             speed = None if speed_mm_h < 0 else speed_mm_h / cls.TELEMETRY_SPEED_MM_PER_KM
@@ -4678,17 +4748,21 @@ class Gen2:
         }
 
         # Extract binary data once
-        event = BinaryTools.unpack('uint8', x, 0x0)
-        module_num = BinaryTools.unpack('uint8', x, 0x1)
-        mod_volt = convert_mv_to_v(BinaryTools.unpack('uint32', x, 0x2))
-        sys_max = convert_mv_to_v(BinaryTools.unpack('uint32', x, 0x6))
-        sys_min = convert_mv_to_v(BinaryTools.unpack('uint32', x, 0xa))
-        capacitor_raw = BinaryTools.unpack('uint32', x, 0x0e)
+        # Written at several lengths (14 bytes, without capacitor voltage,
+        # current and serial, on early firmware); a field the record does not
+        # hold is None.
+        fit = BinaryTools.unpack_fit
+        event = fit('uint8', x, 0x0)
+        module_num = fit('uint8', x, 0x1)
+        mod_volt = none_if_any_none(convert_mv_to_v, fit('uint32', x, 0x2))
+        sys_max = none_if_any_none(convert_mv_to_v, fit('uint32', x, 0x6))
+        sys_min = none_if_any_none(convert_mv_to_v, fit('uint32', x, 0xa))
+        capacitor_raw = fit('uint32', x, 0x0e)
         # -100 mV (0xffffff9c) is the value written when there is no
         # capacitor reading (key-on rows, controller not yet powered): it is
         # the only negative value apart from damaged rows. Not a voltage.
-        capacitor_volt = None if capacitor_raw == cls.BATTERY_STATUS_NO_VCAP else convert_mv_to_v(capacitor_raw)
-        battery_current = BinaryTools.unpack('int16', x, 0x12)
+        capacitor_volt = None if capacitor_raw in (None, cls.BATTERY_STATUS_NO_VCAP) else convert_mv_to_v(capacitor_raw)
+        battery_current = fit('int16', x, 0x12)
         serial_no = BinaryTools.unpack_str(x, 0x14, count=len(x[0x14:]))
 
         # Ensure the serial is printable
@@ -4702,7 +4776,7 @@ class Gen2:
         if event != 0x02:
             printable_serial_no = None
 
-        event_name = events.get(event, 'Unknown (0x{:02x})'.format(event))
+        event_name = events.get(event, 'Unknown' if event is None else 'Unknown (0x{:02x})'.format(event))
 
         # Build structured data
         structured_data = {
@@ -4712,44 +4786,41 @@ class Gen2:
             'module_voltage_volts': mod_volt,
             'system_max_voltage_volts': sys_max,
             'system_min_voltage_volts': sys_min,
-            'voltage_difference_volts': sys_max - sys_min,
+            'voltage_difference_volts': none_if_any_none(lambda a, b: a - b, sys_max, sys_min),
             'capacitor_voltage_volts': capacitor_volt,
             'battery_current_amps': battery_current,
             'serial_number': printable_serial_no,
             'precharge_percent': (convert_ratio_to_percent(capacitor_volt, mod_volt)
-                                  if event == 1 and capacitor_volt is not None else None)
+                                  if event == 1 and capacitor_volt is not None and mod_volt is not None else None)
         }
 
         # Generate legacy conditions string for backward compatibility
         if event_name == opening_contactor:
-            conditions_msg = 'vmod: {modvolt:7.3f}V, batt curr: {batcurr:3.0f}A'.format(
-                modvolt=mod_volt,
-                batcurr=battery_current
+            conditions_msg = 'vmod: {modvolt}V, batt curr: {batcurr}A'.format(
+                modvolt=text_or_na(mod_volt, '7.3f'),
+                batcurr=text_or_na(battery_current, '3.0f')
             )
         elif event_name == closing_contactor:
-            conditions_msg = ('vmod: {modvolt:7.3f}V, maxsys: {sysmax:7.3f}V, '
-                              'minsys: {sysmin:7.3f}V, diff: {diff:0.03f}V, vcap: {vcap}V, '
+            conditions_msg = ('vmod: {modvolt}V, maxsys: {sysmax}V, '
+                              'minsys: {sysmin}V, diff: {diff}V, vcap: {vcap}V, '
                               'prechg: {prechg}%').format(
-                modvolt=mod_volt,
-                sysmax=sys_max,
-                sysmin=sys_min,
-                vcap='n/a' if capacitor_volt is None else format(capacitor_volt, '6.3f'),
-                batcurr=battery_current,
-                serial=printable_serial_no,
-                diff=sys_max - sys_min,
-                prechg=('n/a' if capacitor_volt is None
-                        else format(convert_ratio_to_percent(capacitor_volt, mod_volt), '2.0f')))
+                modvolt=text_or_na(mod_volt, '7.3f'),
+                sysmax=text_or_na(sys_max, '7.3f'),
+                sysmin=text_or_na(sys_min, '7.3f'),
+                vcap=text_or_na(capacitor_volt, '6.3f'),
+                diff=text_or_na(structured_data['voltage_difference_volts'], '0.03f'),
+                prechg=text_or_na(structured_data['precharge_percent'], '2.0f'))
         elif event_name == registered:
-            conditions_msg = 'serial: {serial},  vmod: {modvolt:3.3f}V'.format(
+            conditions_msg = 'serial: {serial},  vmod: {modvolt}V'.format(
                 serial=printable_serial_no,
-                modvolt=mod_volt
+                modvolt=text_or_na(mod_volt, '3.3f')
             )
         else:
             conditions_msg = ''
 
         return {
-            'event': 'Module {module:02} {event}'.format(
-                module=module_num,
+            'event': 'Module {module} {event}'.format(
+                module=text_or_na(module_num, '02'),
                 event=event_name
             ),
             'structured_data': structured_data,
@@ -4766,7 +4837,9 @@ class Gen2:
         }
 
         # Extract binary data once
-        power_on_cause_code = BinaryTools.unpack('uint8', x, 0x1)
+        # The cause byte is None when the record does not hold it. Byte 0
+        # names the event (Power On / Off), so it is read as before.
+        power_on_cause_code = BinaryTools.unpack_fit('uint8', x, 0x1)
         power_on = BinaryTools.unpack('bool', x, 0x0)
         power_state_text = convert_bit_to_on_off(power_on)
         source_name = sources.get(power_on_cause_code, 'Unknown')
@@ -4821,33 +4894,36 @@ class Gen2:
     @classmethod
     def battery_discharge_current_limited(cls, x):
         # Extract binary data once
-        limit = BinaryTools.unpack('uint16', x, 0x00)
-        min_cell_mv = BinaryTools.unpack('uint16', x, 0x02)
+        # Early firmware writes only the 2-byte limit; a field the record
+        # does not hold is None, and so is anything derived from it.
+        fit = BinaryTools.unpack_fit
+        limit = fit('uint16', x, 0x00)
+        min_cell_mv = fit('uint16', x, 0x02)
         # MaxPackTemp is a signed byte (the firmware renderer reads it with
         # ldrsb); below freezing it read 255..242 C as uint8.
         # analysis/legacy_mbb_disarmed_current.md.
-        temp = BinaryTools.unpack('int8', x, 0x04)
-        max_amp = BinaryTools.unpack('uint16', x, 0x05)
+        temp = fit('int8', x, 0x04)
+        max_amp = fit('uint16', x, 0x05)
+        limit_percentage = none_if_any_none(convert_ratio_to_percent, limit, max_amp)
 
         # Build structured data
         structured_data = {
             'limit_current_amps': limit,
             'max_current_amps': max_amp,
-            'limit_percentage': convert_ratio_to_percent(limit, max_amp),
+            'limit_percentage': limit_percentage,
             'min_cell_voltage_mv': min_cell_mv,
-            'min_cell_voltage_volts': round(min_cell_mv / 1000.0, 3),
+            'min_cell_voltage_volts': none_if_any_none(lambda v: round(v / 1000.0, 3), min_cell_mv),
             'max_pack_temp_celsius': temp,
             'is_current_limited': True,
-            'current_reduction_amps': max_amp - limit
+            'current_reduction_amps': none_if_any_none(lambda a, b: a - b, max_amp, limit)
         }
 
         # Generate legacy conditions string for backward compatibility
-        legacy_conditions = '{limit} A ({percent:.2f}%), MinCell: {min_cell}mV, MaxPackTemp: {temp}C'.format(
-            limit=limit,
-            min_cell=min_cell_mv,
-            temp=temp,
-            max_amp=max_amp,
-            percent=convert_ratio_to_percent(limit, max_amp)
+        legacy_conditions = '{limit} A ({percent}%), MinCell: {min_cell}mV, MaxPackTemp: {temp}C'.format(
+            limit=text_or_na(limit),
+            min_cell=text_or_na(min_cell_mv),
+            temp=text_or_na(temp),
+            percent=text_or_na(limit_percentage, '.2f')
         )
 
         return {
@@ -4859,23 +4935,23 @@ class Gen2:
     @classmethod
     def low_chassis_isolation(cls, x):
         # Extract binary data once
-        resistance_kohms = BinaryTools.unpack('uint32', x, 0x00)
-        cell_number = BinaryTools.unpack('uint8', x, 0x04)
+        resistance_kohms = BinaryTools.unpack_fit('uint32', x, 0x00)
+        cell_number = BinaryTools.unpack_fit('uint8', x, 0x04)
 
         # Build structured data
         structured_data = {
             'resistance_kohms': resistance_kohms,
-            'resistance_ohms': resistance_kohms * 1000,
-            'resistance_mohms': resistance_kohms * 1000000,
+            'resistance_ohms': none_if_any_none(lambda v: v * 1000, resistance_kohms),
+            'resistance_mohms': none_if_any_none(lambda v: v * 1000000, resistance_kohms),
             'affected_cell_number': cell_number,
             'isolation_fault': True,
-            'is_critical': resistance_kohms < 500  # Typical critical threshold
+            'is_critical': none_if_any_none(lambda v: v < 500, resistance_kohms)  # Typical critical threshold
         }
 
         # Generate legacy conditions string for backward compatibility
         legacy_conditions = '{kohms} KOhms to cell {cell}'.format(
-            kohms=resistance_kohms,
-            cell=cell_number
+            kohms=text_or_na(resistance_kohms),
+            cell=text_or_na(cell_number)
         )
 
         return {
@@ -4897,23 +4973,26 @@ class Gen2:
         # them with ldrsb in Riding, Charging and Disarmed alike): below
         # freezing, and the -100 C invalid-thermistor value, read as uint8
         # gave 156..255 C. analysis/legacy_mbb_disarmed_current.md.
-        pack_temp_hi = BinaryTools.unpack('int8', x, 0x0)
-        pack_temp_low = BinaryTools.unpack('int8', x, 0x1)
-        soc = BinaryTools.unpack('uint16', x, 0x2)
-        pack_voltage = convert_mv_to_v(BinaryTools.unpack('uint32', x, 0x4))
-        motor_temp = BinaryTools.unpack('int16', x, 0x8)
-        controller_temp = BinaryTools.unpack('int16', x, 0xa)
-        rpm = BinaryTools.unpack('uint16', x, 0xc)
+        # The record is written at several lengths (one byte at the shortest);
+        # a field the record does not hold is None.
+        fit = BinaryTools.unpack_fit
+        pack_temp_hi = fit('int8', x, 0x0)
+        pack_temp_low = fit('int8', x, 0x1)
+        soc = fit('uint16', x, 0x2)
+        pack_voltage = none_if_any_none(convert_mv_to_v, fit('uint32', x, 0x4))
+        motor_temp = fit('int16', x, 0x8)
+        controller_temp = fit('int16', x, 0xa)
+        rpm = fit('uint16', x, 0xc)
         # Signed 16-bit, the same field as run_status(): the MBB firmware
         # renders Disarmed (0x3c) and Riding (0x2c) with one template and
         # reads offset 0x10 as a sign-extended halfword for both. Read as
         # uint8 it turned every charging current of -1..-128 A into
         # 255..128 A. Evidence: analysis/legacy_mbb_disarmed_current.md.
-        battery_current = BinaryTools.unpack('int16', x, 0x10)
-        mods = BinaryTools.unpack('uint8', x, 0x12)
-        motor_current = BinaryTools.unpack('int8', x, 0x13)
-        ambient_temp = BinaryTools.unpack('int16', x, 0x15)
-        odometer = BinaryTools.unpack('uint32', x, 0x17)
+        battery_current = fit('int16', x, 0x10)
+        mods = fit('uint8', x, 0x12)
+        motor_current = fit('int8', x, 0x13)
+        ambient_temp = fit('int16', x, 0x15)
+        odometer = fit('uint32', x, 0x17)
 
         # Build structured data dictionary
         structured_data = {
@@ -4935,26 +5014,26 @@ class Gen2:
         # Generate legacy conditions string for backward compatibility
         legacy_conditions = (
             'PackTemp: h {pack_temp_hi}C, l {pack_temp_low}C, '
-            'PackSOC:{soc:3d}%, '
-            'Vpack:{pack_voltage:03.3f}V, '
-            'MotAmps:{motor_current:4d}, BattAmps:{battery_current:4d}, '
-            'Mods: {mods:02b}, '
-            'MotTemp:{motor_temp:4d}C, CtrlTemp:{controller_temp:4d}C, '
-            'AmbTemp:{ambient_temp:4d}C, '
-            'MotRPM:{rpm:4d}, '
-            'Odo:{odometer:5d}km').format(
-                pack_temp_hi=pack_temp_hi,
-                pack_temp_low=pack_temp_low,
-                soc=soc,
-                pack_voltage=pack_voltage,
-                motor_temp=motor_temp,
-                controller_temp=controller_temp,
-                rpm=rpm,
-                battery_current=battery_current,
-                mods=mods,
-                motor_current=motor_current,
-                ambient_temp=ambient_temp,
-                odometer=odometer)
+            'PackSOC:{soc}%, '
+            'Vpack:{pack_voltage}V, '
+            'MotAmps:{motor_current}, BattAmps:{battery_current}, '
+            'Mods: {mods}, '
+            'MotTemp:{motor_temp}C, CtrlTemp:{controller_temp}C, '
+            'AmbTemp:{ambient_temp}C, '
+            'MotRPM:{rpm}, '
+            'Odo:{odometer}km').format(
+                pack_temp_hi=text_or_na(pack_temp_hi),
+                pack_temp_low=text_or_na(pack_temp_low),
+                soc=text_or_na(soc, '3d'),
+                pack_voltage=text_or_na(pack_voltage, '03.3f'),
+                motor_temp=text_or_na(motor_temp, '4d'),
+                controller_temp=text_or_na(controller_temp, '4d'),
+                rpm=text_or_na(rpm, '4d'),
+                battery_current=text_or_na(battery_current, '4d'),
+                mods=text_or_na(mods, '02b'),
+                motor_current=text_or_na(motor_current, '4d'),
+                ambient_temp=text_or_na(ambient_temp, '4d'),
+                odometer=text_or_na(odometer, '5d'))
 
         return {
             'event': 'Disarmed',

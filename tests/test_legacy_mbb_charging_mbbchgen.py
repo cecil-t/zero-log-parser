@@ -51,10 +51,11 @@ def test_any_nonzero_byte_is_yes():
     assert _decode(_charging(0x20))['structured_data']['mbb_charge_enabled'] is True
 
 
-def test_short_payload_keeps_previous_value():
-    # Too short to hold byte 0x0a: unchanged from before (Yes).
+def test_short_payload_has_no_flag():
+    # Too short to hold byte 0x0a: the record does not say, so None.
     out = _decode(_charging(0, length=10))
-    assert out['structured_data']['mbb_charge_enabled'] is True
+    assert out['structured_data']['mbb_charge_enabled'] is None
+    assert 'MbbChgEn: n/a' in out['conditions']
 
 
 def test_other_fields_unchanged():
