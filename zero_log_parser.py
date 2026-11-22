@@ -6438,6 +6438,30 @@ class Gen2:
         kept = [c for i, c in enumerate(collected) if i not in drop]
         return [(ts, payload, n) for n, (ts, payload, _) in enumerate(kept)]
 
+    # Legacy MBB and BMS logs can hold whole blocks of entries a second time,
+    # later in the buffer. Byte-identical entries are also common there for
+    # real: every key-on writes the same uptime-0 records, a message can be
+    # logged again in the same second, and one message can flood the log. So
+    # a later copy is dropped only when its time is a wall-clock value (not
+    # uptime), the bytes around the two copies match for at least
+    # DUPLICATE_CONTEXT_BYTES, and the earlier copy is at least
+    # LEGACY_COPY_MIN_GAP bytes before it.
+    LEGACY_COPY_MIN_GAP = 128
+
+    @classmethod
+    def drop_legacy_copies(cls, buf, collected, spans):
+        """collected (the walk's (sort_timestamp, entry_payload, entry_num)
+        list, after assign_legacy_times) without the later copies the rule
+        above finds (find_duplicate_entries on the wall-clock entries only).
+        The rest keep their order and their entry numbers."""
+        wall = [span if (p.get('raw_timestamp') is not None and p['raw_timestamp'] >= cls.CLOCK_MIN) else None
+                for (_ts, p, _n), span in zip(collected, spans)]
+        drop = {d['index'] for d in cls.find_duplicate_entries(buf, wall)
+                if d['context'] >= cls.DUPLICATE_CONTEXT_BYTES and d['gap'] >= cls.LEGACY_COPY_MIN_GAP}
+        if not drop:
+            return collected
+        return [c for i, c in enumerate(collected) if i not in drop]
+
     @classmethod
     def collect_paged_bms_entries(cls, buf, logger, timezone_offset=None, verbosity_level=1, log_type=None, gen3_text=False,
                                   entry_spans=None):
@@ -7001,11 +7025,15 @@ class LogData(object):
                 or getattr(self, 'vin_source', None) is not None:
             return
         entries = self._get_processed_entries() or []
-        n = len(entries)
+        # judged on the entries as walked: the legacy copies dropped count too
+        dropped = getattr(self, 'legacy_copies_dropped', None) or []
+        n = len(entries) + len(dropped)
         if not n:
             return
-        unknown = sum(1 for e in entries if str(e.event).startswith(('Unknown Type', 'BMS Unknown Type')))
-        invalid = sum(1 for e in entries if e.time_source == 'invalid')
+        unknown = sum(1 for e in entries if str(e.event).startswith(('Unknown Type', 'BMS Unknown Type'))) \
+            + sum(1 for p in dropped if str(p.get('event', '')).startswith(('Unknown Type', 'BMS Unknown Type')))
+        invalid = sum(1 for e in entries if e.time_source == 'invalid') \
+            + sum(1 for p in dropped if p.get('time_source') == 'invalid')
         if unknown >= self.NOT_A_LOG_MIN_SHARE * n and invalid >= self.NOT_A_LOG_MIN_SHARE * n:
             raise UnreadableLogError(
                 'Cannot decode %s: not a Zero log (no board type, platform or VIN, and %d of its %d '
@@ -7228,16 +7256,26 @@ class LogData(object):
             collected_entries = Gen2.assign_legacy_times(collected_entries, self.timezone_offset,
                                                          clock_floor=clock_floor, marker_clock=marker_clock)
 
-            # FST/Gen3 only: drop entries whose bytes repeat an earlier entry
+            # FST/Gen3: drop entries whose bytes repeat an earlier entry
             # (Gen2.find_duplicate_entries). log_version REV3 also covers
             # legacy-platform ring-buffer files, so the file must also start
             # with the FST/Gen3 system information entry (Gen2.is_fst_platform_file).
-            # Legacy files are left as read. Runs after the time assignment,
-            # so the entries that remain keep the times they had with the
-            # copies present.
-            if self.log_version == REV3 and Gen2.is_fst_platform_file(self.log_file.raw()) \
-                    and len(entry_spans) == len(collected_entries):
-                collected_entries = Gen2.drop_duplicate_entries(self.entries, collected_entries, entry_spans)
+            # Legacy files drop only later copies of whole blocks
+            # (Gen2.drop_legacy_copies), and the other entries keep their
+            # numbers. Both run after the time assignment, so the entries that
+            # remain keep the times they had with the copies present.
+            # The legacy copies dropped are kept aside for require_zero_log,
+            # which judges the file on the entries as walked.
+            self.legacy_copies_dropped = []
+            if len(entry_spans) == len(collected_entries):
+                if self.log_version == REV3 and Gen2.is_fst_platform_file(self.log_file.raw()):
+                    collected_entries = Gen2.drop_duplicate_entries(self.entries, collected_entries, entry_spans)
+                else:
+                    kept = Gen2.drop_legacy_copies(self.entries, collected_entries, entry_spans)
+                    if len(kept) != len(collected_entries):
+                        kept_ids = {id(c[1]) for c in kept}
+                        self.legacy_copies_dropped = [c[1] for c in collected_entries if id(c[1]) not in kept_ids]
+                    collected_entries = kept
 
             # Apply time filtering if specified
             if start_time or end_time:

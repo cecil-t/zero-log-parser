@@ -119,7 +119,7 @@ Each log entry follows this structure:
 
 | Field | Description |
 |-------|-------------|
-| `entry_number` | Original entry number from the log file |
+| `entry_number` | Original entry number from the log file. In legacy MBB and BMS logs, a later copy of a whole block of entries (byte-identical entries with a wall-clock time, at least 64 matching bytes around them, the earlier copy at least 128 bytes before) is left out, and the other entries keep their numbers, so the numbers can have gaps |
 | `timestamp` | Human-readable timestamp in configured timezone. `null` when the entry has only a time since power-on (`time_source` is `"uptime"`) or no usable date (`"invalid"`) |
 | `sort_timestamp` | True UTC Unix epoch (not dependent on the host timezone); `null` when the entry has no time of day |
 | `raw_timestamp` | The 32-bit value as read from the entry (legacy MBB/BMS entries; Gen3 entries repeat the epoch). `null` for corrupted or recovered entries that carry none |
