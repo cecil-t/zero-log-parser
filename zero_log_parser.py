@@ -1320,22 +1320,50 @@ class Gen2:
     # Bytes of the event log header marker (a2 a2 a2 a2). An entry next to
     # the ring-buffer seam can take its time bytes from it.
     SEAM_MARKER_BYTES = b'\xa2\xa2'
+    # A run of at least WRONG_CLOCK_RUN_MIN consecutive entries past
+    # clock_max, each 0 to WRONG_CLOCK_RUN_MAX_STEP seconds after the one
+    # before, was written while the bike's clock was set to a wrong date:
+    # the clock ran at its normal pace from a wrong starting value.
+    WRONG_CLOCK_RUN_MIN = 20
+    WRONG_CLOCK_RUN_MAX_STEP = 86400
 
     @classmethod
-    def label_time_notes(cls, collected):
+    def label_time_notes(cls, collected, now=None):
         """Set payload['time_note'] on invalid entries, after
         assign_legacy_times, to say why they have no usable date. The dates
         themselves are not changed.
           "seam": the time bytes hold the event log header marker
           (SEAM_MARKER_BYTES), so they come from the ring-buffer seam, not
           from a clock.
-        collected: the (sort_timestamp, payload, entry_num) list."""
+          "wrong_clock_run": the entry is in a run of at least
+          WRONG_CLOCK_RUN_MIN consecutive entries in log order, all invalid
+          with a raw value past clock_max(now), each raw value 0 to
+          WRONG_CLOCK_RUN_MAX_STEP seconds after the one before. A "seam"
+          entry keeps that note.
+        collected: the (sort_timestamp, payload, entry_num) list, in log order."""
+        ceiling = cls.clock_max(now)
+        run = []
+
+        def close():
+            if len(run) >= cls.WRONG_CLOCK_RUN_MIN:
+                for p in run:
+                    p.setdefault('time_note', 'wrong_clock_run')
+
         for _ts, payload, _num in collected:
             raw = payload.get('raw_timestamp')
-            if payload.get('time_source') != 'invalid' or raw is None:
-                continue
-            if cls.SEAM_MARKER_BYTES in struct.pack('<I', raw):
+            invalid = payload.get('time_source') == 'invalid' and raw is not None
+            if invalid and cls.SEAM_MARKER_BYTES in struct.pack('<I', raw):
                 payload['time_note'] = 'seam'
+            if invalid and raw > ceiling:
+                if run and 0 <= raw - run[-1]['raw_timestamp'] <= cls.WRONG_CLOCK_RUN_MAX_STEP:
+                    run.append(payload)
+                    continue
+                close()
+                run = [payload]
+            else:
+                close()
+                run = []
+        close()
 
     @classmethod
     def bms_discharge_level(cls, x):

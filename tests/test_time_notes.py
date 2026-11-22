@@ -71,3 +71,41 @@ def test_label_time_notes_directly():
                  (0, {'time_source': None, 'raw_timestamp': None}, 2)]
     Gen2.label_time_notes(collected)
     assert [p.get('time_note') for _t, p, _n in collected] == ['seam', None, None]
+
+
+W = 0xc0000000   # 2072: past the ceiling
+
+
+def test_run_of_twenty_past_the_ceiling_is_labelled():
+    e = _entries([T] + [W + 60 * k for k in range(20)] + [T + 5])
+    assert [e[n].get('time_note') for n in range(2, 22)] == ['wrong_clock_run'] * 20
+    assert all(e[n]['time_source'] == 'invalid' and e[n]['timestamp'] is None for n in range(2, 22))
+    assert 'time_note' not in e[1] and 'time_note' not in e[22]
+
+
+def test_nineteen_are_not_a_run():
+    e = _entries([T] + [W + 60 * k for k in range(19)] + [T + 5])
+    assert not any('time_note' in x for x in e.values())
+
+
+def test_step_over_a_day_or_backwards_splits_the_run():
+    raws = [W + 60 * k for k in range(15)] + [W + 60 * 14 + 86401 + 60 * k for k in range(15)]
+    assert not any('time_note' in x for x in _entries([T] + raws).values())
+    raws = [W + 5000 + 60 * k for k in range(15)] + [W + 2000 + 60 * k for k in range(15)]
+    assert not any('time_note' in x for x in _entries([T] + raws).values())
+    raws = [W + 60 * k for k in range(19)] + [W + 60 * 18 + 86400] + [W + 60 * 18 + 86400] * 3
+    e = _entries([T] + raws)
+    assert sum(x.get('time_note') == 'wrong_clock_run' for x in e.values()) == 23
+
+
+def test_a_dated_entry_inside_splits_the_run():
+    raws = [W + 60 * k for k in range(12)] + [T + 9] + [W + 60 * (12 + k) for k in range(12)]
+    assert not any('time_note' in x for x in _entries([T] + raws).values())
+
+
+def test_label_time_notes_directly_run_and_seam():
+    raws = [W + k for k in range(10)] + [0xa2a2a2a2] + [W + 10 + k for k in range(10)]
+    collected = [(0, {'time_source': 'invalid', 'raw_timestamp': r}, i) for i, r in enumerate(raws)]
+    Gen2.label_time_notes(collected)
+    # the seam entry is past the ceiling but years after its neighbour: it splits the run
+    assert [p.get('time_note') for _t, p, _n in collected] == [None] * 10 + ['seam'] + [None] * 10
