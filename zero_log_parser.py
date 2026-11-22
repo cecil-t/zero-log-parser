@@ -4800,6 +4800,19 @@ class Gen2:
         # the only negative value apart from damaged rows. Not a voltage.
         capacitor_volt = None if capacitor_raw in (None, cls.BATTERY_STATUS_NO_VCAP) else convert_mv_to_v(capacitor_raw)
         battery_current = fit('int16', x, 0x12)
+        # Opening and Registered rows often leave whole blocks unwritten
+        # (zero), where a real reading cannot be zero: a connected module's
+        # voltage, and the system max / min pack voltages. A block left all
+        # zero is no reading; a lone zero elsewhere (0 A as the contactor
+        # opens) is kept.
+        if event in (0x00, 0x02):
+            body = bytes(x[2:])
+            if event == 0x00 and len(body) and not any(body):
+                mod_volt = sys_max = sys_min = capacitor_volt = battery_current = None
+            elif len(x) >= 14 and not any(x[2:14]):
+                mod_volt = sys_max = sys_min = None
+            elif len(x) >= 14 and not any(x[6:14]):
+                sys_max = sys_min = None
         serial_no = BinaryTools.unpack_str(x, 0x14, count=len(x[0x14:]))
 
         # Ensure the serial is printable
