@@ -3579,6 +3579,13 @@ class Gen2:
             value = BinaryTools.unpack('uint8', x, offset)
             return None if value in sentinels else value
 
+        def temperature_at(offset):
+            # A signed byte (-2 C is 0xFE). 0xF0 / 0xFF stay None as before:
+            # most are placeholders far from the readings around them, and
+            # nothing in the record tells them from a real -16 / -1 C.
+            value = byte_at(offset)
+            return None if value is None else (value - 256 if value >= 0x80 else value)
+
         data = {}
         conditions = []
 
@@ -3595,7 +3602,7 @@ class Gen2:
         data['bms_report_mode_label'] = 'active' if mode == 7 else None
 
         # payload 25: a temperature (0.87 correlation with the MBB pack temperatures).
-        data['bms_temperature_c'] = byte_at(25 + shift)
+        data['bms_temperature_c'] = temperature_at(25 + shift)
 
         # payload 26-29: a four-byte status word, little endian, exposed raw.
         # Not a temperature, count, cell index or limit (every byte takes a
@@ -3655,8 +3662,8 @@ class Gen2:
 
         if key in cls.BMS_CELL_TEMPERATURE_OFFSETS:
             coldest_at, hottest_at = cls.BMS_CELL_TEMPERATURE_OFFSETS[key]
-            data['cell_temperature_coldest_c'] = byte_at(coldest_at)
-            data['cell_temperature_hottest_c'] = byte_at(hottest_at)
+            data['cell_temperature_coldest_c'] = temperature_at(coldest_at)
+            data['cell_temperature_hottest_c'] = temperature_at(hottest_at)
 
         if key in cls.BMS_CAPACITY_OFFSETS:
             for name, at in zip(('full_charge_capacity_ah', 'full_charge_capacity_twin_ah'),
