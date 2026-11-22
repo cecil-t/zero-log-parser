@@ -32,6 +32,7 @@ maintaining full backward compatibility. Redundant patterns removed from improve
 
 """
 
+import bisect
 import codecs
 import json
 import logging
@@ -106,6 +107,7 @@ class ProcessedLogEntry:
     raw_timestamp: Optional[int] = None       # The raw uint32 itself
     uptime_s: Optional[int] = None            # Seconds since power-on, when the raw value is one
     time_source: Optional[str] = None         # "clock", "backfilled", "uptime" (None: no raw time)
+    time_repair: Optional[str] = None         # "page_marker": clock value rebuilt (Gen2.marker_clock_low_bits)
     # Gen3 text restored from the shipped template table (see Gen2.gen3_text_message)
     text_restored: bool = False
     restored_spans: Optional[list] = None      # [{offset, length, text}], offsets into the restored message
@@ -1131,8 +1133,60 @@ class Gen2:
                     last_dated = epoch[i]
         return epoch, source, rejected
 
+    # The FST/Gen3 BMS page marker (PAGE_MARKER) can land on an entry's 4
+    # time bytes and overwrite their top bytes, leaving the low bytes of the
+    # clock value: raw 0xF000xxxx (marker from time byte 2, low 16 bits left)
+    # or 0xFFF000xx (marker from time byte 1, low 8 bits left). Per form: the
+    # value with the low bits masked off, the mask, the number of surviving
+    # low bits, and the index in the unescaped block (type byte 0, time bytes
+    # 1-4) where the marker starts.
+    MARKER_CLOCK_FORMS = ((0xF0000000, 0xFFFF0000, 16, 3), (0xFFF00000, 0xFFFFFF00, 8, 2))
+
     @classmethod
-    def assign_legacy_times(cls, collected, timezone_offset=None, now=None, clock_floor=None):
+    def marker_clock_low_bits(cls, buf, span, raw):
+        """(low bits, number of bits) for an entry whose raw time value had its
+        top bytes overwritten by the page marker, or None. The value must be one
+        of MARKER_CLOCK_FORMS and the marker must sit in the entry's own bytes
+        in buf at the time byte that form implies. span is the entry's
+        (start, length) in buf, as the walkers record it, or None."""
+        if span is None or not isinstance(raw, int):
+            return None
+        form = next((f for f in cls.MARKER_CLOCK_FORMS if raw & f[1] == f[0]), None)
+        if form is None:
+            return None
+        _top, mask, bits, at = form
+        start, length = span
+        escaped = bytes(buf[start + 2:start + length])
+        pos = escaped.find(cls.PAGE_MARKER)
+        if pos < 0 or cls._unescaped_index_map(escaped)[pos] != at:
+            return None
+        return raw & ~mask & 0xFFFFFFFF, bits
+
+    @classmethod
+    def rebuild_marker_clock(cls, low, bits, before, after):
+        """The clock value an entry held before the page marker overwrote its
+        top bytes: the surviving low bits under the high bits of a neighbouring
+        clock value (before, after: the clock values on either side in log
+        order, in the same power cycle). Of the candidates, the one nearest its
+        neighbour is taken. It is accepted only when it lies between the two
+        neighbours and within half the low-bit range (128 s for 8 bits,
+        32,768 s for 16) of the neighbour it came from; otherwise None."""
+        if before is None or after is None or before > after:
+            return None
+        period = 1 << bits
+        best = None
+        for ref in (before, after):
+            base = ref - ref % period
+            cand = min((base - period + low, base + low, base + period + low), key=lambda t: abs(t - ref))
+            if best is None or abs(cand - ref) < best[1]:
+                best = (cand, abs(cand - ref))
+        cand, distance = best
+        if before <= cand <= after and distance <= period // 2:
+            return cand
+        return None
+
+    @classmethod
+    def assign_legacy_times(cls, collected, timezone_offset=None, now=None, clock_floor=None, marker_clock=None):
         """
         Give every legacy (Gen2 parse_entry) entry its time, from the raw uint32.
 
@@ -1162,6 +1216,15 @@ class Gen2:
         of the file's VIN); a value from CLOCK_MIN up to it is "invalid", so it
         cannot anchor a backfill either: the next clock value in the cycle
         does. None keeps CLOCK_MIN. Backfilled times may not fall below it.
+        marker_clock: {index in collected: (low bits, number of bits)} for
+        entries whose time value the page marker overwrote
+        (marker_clock_low_bits). After the times above are placed, each such
+        entry that is still invalid is rebuilt from its neighbouring clock
+        values (rebuild_marker_clock): the nearest clock entries before and
+        after it in log order, with no uptime entry between them (one power
+        cycle). A rebuilt entry is "clock" with payload['time_repair'] set to
+        "page_marker"; it takes no part in placing other entries. One that
+        cannot be rebuilt stays invalid.
         Returns the same shape, with sort_timestamp a true UTC epoch (0 for
         uptime-only and timeless entries), payload['time'] the display string,
         and payload['time_source'/'raw_timestamp'/'uptime_s'/'_order'] set.
@@ -1195,6 +1258,29 @@ class Gen2:
             for i in rejected:
                 kind[i] = 'invalid'
 
+        # Clock values whose top bytes the page marker overwrote
+        repaired = set()
+        if marker_clock:
+            clock_at = [i for i in range(n) if kind[i] == 'clock']
+            uptime_at = [i for i in range(n) if kind[i] == 'uptime']
+            for i in sorted(marker_clock):
+                if kind[i] != 'invalid':
+                    continue
+                j = bisect.bisect_left(clock_at, i)
+                if j == 0 or j == len(clock_at):
+                    continue
+                b, a = clock_at[j - 1], clock_at[j]
+                # an uptime entry between them starts a new power cycle
+                k = bisect.bisect_left(uptime_at, b)
+                if k < len(uptime_at) and uptime_at[k] < a:
+                    continue
+                low, bits = marker_clock[i]
+                t = cls.rebuild_marker_clock(low, bits, raw_of(b), raw_of(a))
+                if t is not None:
+                    epoch[i] = t
+                    source[i] = 'clock'
+                    repaired.add(i)
+
         # Order key: real times by time; others sit just after the nearest earlier dated entry
         out = []
         anchor = float('-inf')
@@ -1224,6 +1310,8 @@ class Gen2:
                 dated = False
             payload['raw_timestamp'] = raw
             payload['uptime_s'] = raw if kind[i] == 'uptime' else None
+            if i in repaired:
+                payload['time_repair'] = 'page_marker'
             payload['_order'] = (anchor, dated, i)
             out.append((sort_ts, payload, entry_num))
         return out
@@ -7127,8 +7215,18 @@ class LogData(object):
             clock_floor = None
             if getattr(self, 'vin_source', None) in ('header', 'filename'):
                 clock_floor = Gen2.vin_clock_floor(self.header_info.get('VIN'))
+            # FST/Gen3 BMS page format: clock values whose top bytes the page
+            # marker overwrote are rebuilt from their neighbours (Gen2.rebuild_marker_clock)
+            marker_clock = None
+            if self.log_version == REV3 and Gen2.is_paged_bms_format(self.entries) \
+                    and len(entry_spans) == len(collected_entries):
+                marker_clock = {}
+                for k, ((_ts, payload, _num), span) in enumerate(zip(collected_entries, entry_spans)):
+                    low = Gen2.marker_clock_low_bits(self.entries, span, payload.get('original_timestamp'))
+                    if low is not None:
+                        marker_clock[k] = low
             collected_entries = Gen2.assign_legacy_times(collected_entries, self.timezone_offset,
-                                                         clock_floor=clock_floor)
+                                                         clock_floor=clock_floor, marker_clock=marker_clock)
 
             # FST/Gen3 only: drop entries whose bytes repeat an earlier entry
             # (Gen2.find_duplicate_entries). log_version REV3 also covers
@@ -7191,7 +7289,8 @@ class LogData(object):
                     event_has_newline=bool(entry_payload.get('event_has_newline')),
                     raw_timestamp=entry_payload.get('raw_timestamp'),
                     uptime_s=entry_payload.get('uptime_s'),
-                    time_source=entry_payload.get('time_source')
+                    time_source=entry_payload.get('time_source'),
+                    time_repair=entry_payload.get('time_repair')
                 )
                 processed_entries.append(processed_entry)
 
@@ -8189,6 +8288,8 @@ class LogData(object):
             if entry.uptime_s is not None:
                 json_entry['uptime_s'] = entry.uptime_s
             json_entry['time_source'] = entry.time_source
+            if entry.time_repair is not None:
+                json_entry['time_repair'] = entry.time_repair
 
             json_output['entries'].append(json_entry)
 
