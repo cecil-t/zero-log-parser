@@ -62,5 +62,5 @@ def test_other_fields_unchanged():
     sd = _decode(_discharge_level(pack_temp=-4, bms_temp=-2))['structured_data']
     assert sd['state_of_charge_percent'] == 64
     assert sd['pack_voltage_volts'] == 110.7
-    assert sd['current_amps'] == -4  # the decoder truncates to whole amps
+    assert sd['current_amps'] == -4.5  # microamps kept to 0.001 A
     assert sd['mode'] == 'Bike On'

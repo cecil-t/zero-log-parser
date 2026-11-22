@@ -407,6 +407,12 @@ TXT_UNIT_BY_KEY = {
     'nominal_capacity_mah': 'mAh',      # BMS SOC Data
 }
 
+# Text output: a fixed number of decimals for a key of one event, with its unit
+# ((event, key) -> (format spec, unit)). The JSON keeps the full value.
+TXT_FORMAT_BY_EVENT_KEY = {
+    ('Discharge level', 'current_amps'): ('.1f', 'A'),   # legacy BMS, value to 0.001 A
+}
+
 
 def event_rule_log_level(message: str):
     """Level from EVENT_LOG_LEVEL_RULES for the event text, or None."""
@@ -1238,7 +1244,11 @@ class Gen2:
         structured_data = {
             'amp_hours': none_if_any_none(lambda v: trunc(v / 1000000.0), fit('uint32', x, 0x06)),
             'state_of_charge_percent': fit('uint8', x, 0x0a),
-            'current_amps': none_if_any_none(lambda v: trunc(v / 1000000.0), fit('int32', x, 0x10)),
+            # The int32 is microamps; the part below one amp is a real
+            # measurement (it spreads like one, and agrees with the main
+            # board's current better than the whole amps do), so it is kept,
+            # to 0.001 A.
+            'current_amps': none_if_any_none(lambda v: round(v / 1000000.0, 3), fit('int32', x, 0x10)),
             'voltage_low_cell_volts': none_if_any_none(lambda v: v / 1000.0, low_mv),
             'voltage_unloaded_cell_volts': none_if_any_none(lambda v: v / 1000.0, fit('uint16', x, 0x14)),
             'voltage_high_cell_volts': none_if_any_none(lambda v: v / 1000.0, high_mv),
@@ -8265,7 +8275,7 @@ class LogData(object):
                 else:
                     return str(value)
 
-            def format_structured_data(structured_data):
+            def format_structured_data(structured_data, event=None):
                 """Format structured data as readable key-value pairs. A
                 raw_hex field renders as a bracketed undecoded-hex tag with
                 no separate label; bytes_corrupted/corrupted_byte_count
@@ -8308,6 +8318,10 @@ class LogData(object):
                         formatted_pairs.append(format_structured_value(key, value))
                         continue
                     readable_key = key.replace('_', ' ').title()
+                    fixed = TXT_FORMAT_BY_EVENT_KEY.get((event, key))
+                    if fixed and isinstance(value, (int, float)) and not isinstance(value, bool):
+                        formatted_pairs.append(f"{readable_key}: {format(value, fixed[0])}{fixed[1]}")
+                        continue
                     formatted_pairs.append(f"{readable_key}: {format_structured_value(key, value)}")
 
                 if structured_data.get('bytes_corrupted'):
@@ -8328,7 +8342,7 @@ class LogData(object):
                 conditions_display = ""
                 if entry.structured_data:
                     # Format structured data as readable key-value pairs
-                    conditions_display = format_structured_data(entry.structured_data)
+                    conditions_display = format_structured_data(entry.structured_data, entry.event)
                 elif entry.conditions:
                     conditions_display = entry.conditions
 
