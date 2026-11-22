@@ -2658,18 +2658,18 @@ class Gen2:
         # temperature and odometer; a field the record does not hold is None,
         # not the 0 the zero padding would give.
         fit = BinaryTools.unpack_fit
-        pack_temp_hi = fit('int8', x, 0x0)
-        pack_temp_low = fit('int8', x, 0x1)
+        pack_temp_hi = cls.legacy_temp(fit('int8', x, 0x0))
+        pack_temp_low = cls.legacy_temp(fit('int8', x, 0x1))
         soc = fit('uint16', x, 0x2)
         pack_voltage = none_if_any_none(convert_mv_to_v, fit('uint32', x, 0x4))
-        motor_temp = fit('int16', x, 0x8)
-        controller_temp = fit('int16', x, 0xa)
+        motor_temp = cls.legacy_temp(fit('int16', x, 0x8))
+        controller_temp = cls.legacy_temp(fit('int16', x, 0xa))
         rpm = fit('uint16', x, 0xc)
         battery_current = fit('int16', x, 0x10)
         mods_raw = fit('uint8', x, 0x12)
         mods = None if mods_raw is None else mod_translate.get(mods_raw, 'Unknown')
         motor_current = fit('int16', x, 0x13)
-        ambient_temp = fit('int16', x, 0x15)
+        ambient_temp = cls.legacy_temp(fit('int16', x, 0x15))
         odometer = fit('uint32', x, 0x17)
 
         # Build structured data dictionary
@@ -2729,13 +2729,13 @@ class Gen2:
         # Early firmware writes this record 13 bytes long, without ambient
         # temperature; a field the record does not hold is None.
         fit = BinaryTools.unpack_fit
-        pack_temp_hi = fit('int8', x, 0x00)
-        pack_temp_low = fit('int8', x, 0x01)
+        pack_temp_hi = cls.legacy_temp(fit('int8', x, 0x00))
+        pack_temp_low = cls.legacy_temp(fit('int8', x, 0x01))
         soc = fit('uint16', x, 0x02)
         pack_voltage = none_if_any_none(convert_mv_to_v, fit('uint32', x, 0x4))
         battery_current = fit('int8', x, 0x08)
         mods = fit('uint8', x, 0x0c)
-        ambient_temp = fit('int8', x, 0x0d)
+        ambient_temp = cls.legacy_temp(fit('int8', x, 0x0d))
         # MbbChgEn: the firmware renderer prints Yes when byte 0x0a is non-zero
         # and No when it is zero. It is 0 while charging pauses (current ~0 A,
         # SOC flat) and 1 while the battery takes charge. None when the record
@@ -4738,6 +4738,15 @@ class Gen2:
         }
 
     BATTERY_STATUS_NO_VCAP = 0xffffff9c   # -100 mV
+    # The classic MBB firmware writes -100 C for a temperature it has no
+    # sensor reading for (invalid thermistor): not a temperature.
+    LEGACY_MBB_NO_TEMP_C = -100
+
+    @classmethod
+    def legacy_temp(cls, value):
+        """A classic MBB temperature, or None for the firmware's -100 C
+        no-reading value."""
+        return None if value == cls.LEGACY_MBB_NO_TEMP_C else value
 
     @classmethod
     def battery_status(cls, x):
@@ -4905,7 +4914,7 @@ class Gen2:
         # MaxPackTemp is a signed byte (the firmware renderer reads it with
         # ldrsb); below freezing it read 255..242 C as uint8.
         # analysis/legacy_mbb_disarmed_current.md.
-        temp = fit('int8', x, 0x04)
+        temp = cls.legacy_temp(fit('int8', x, 0x04))
         max_amp = fit('uint16', x, 0x05)
         limit_percentage = none_if_any_none(convert_ratio_to_percent, limit, max_amp)
 
@@ -4979,12 +4988,12 @@ class Gen2:
         # The record is written at several lengths (one byte at the shortest);
         # a field the record does not hold is None.
         fit = BinaryTools.unpack_fit
-        pack_temp_hi = fit('int8', x, 0x0)
-        pack_temp_low = fit('int8', x, 0x1)
+        pack_temp_hi = cls.legacy_temp(fit('int8', x, 0x0))
+        pack_temp_low = cls.legacy_temp(fit('int8', x, 0x1))
         soc = fit('uint16', x, 0x2)
         pack_voltage = none_if_any_none(convert_mv_to_v, fit('uint32', x, 0x4))
-        motor_temp = fit('int16', x, 0x8)
-        controller_temp = fit('int16', x, 0xa)
+        motor_temp = cls.legacy_temp(fit('int16', x, 0x8))
+        controller_temp = cls.legacy_temp(fit('int16', x, 0xa))
         rpm = fit('uint16', x, 0xc)
         # Signed 16-bit, the same field as run_status(): the MBB firmware
         # renders Disarmed (0x3c) and Riding (0x2c) with one template and
@@ -4994,7 +5003,7 @@ class Gen2:
         battery_current = fit('int16', x, 0x10)
         mods = fit('uint8', x, 0x12)
         motor_current = fit('int8', x, 0x13)
-        ambient_temp = fit('int16', x, 0x15)
+        ambient_temp = cls.legacy_temp(fit('int16', x, 0x15))
         odometer = fit('uint32', x, 0x17)
 
         # Build structured data dictionary
@@ -5149,11 +5158,10 @@ class Gen2:
     def bms_disable_temp(cls, message_type, x):
         """Types 0x1e / 0x1f: "BMS Disable - High Temp" / "BMS Disable - Low
         Temp", 4 bytes: int8 pack temp C, uint8 module, uint16 status. The
-        firmware logs -100 C for an invalid thermistor reading; it is kept
-        as-is, not reinterpreted."""
+        firmware logs -100 C for an invalid thermistor reading: None."""
         if len(x) != 4:
             return cls.unhandled_entry_format(message_type, x)
-        pack_temp = BinaryTools.unpack('int8', x, 0x00)
+        pack_temp = cls.legacy_temp(BinaryTools.unpack('int8', x, 0x00))
         module_number = BinaryTools.unpack('uint8', x, 0x01)
         status = BinaryTools.unpack('uint16', x, 0x02)
         return {
@@ -5165,7 +5173,7 @@ class Gen2:
                 'status_hex': f'0x{status:04x}',
             },
             'conditions': 'Pack Temp: {t} C, Module: {m}, Status: 0x{s:04X}'.format(
-                t=pack_temp, m=module_number, s=status)
+                t=text_or_na(pack_temp), m=module_number, s=status)
         }
 
     @classmethod
@@ -5179,7 +5187,7 @@ class Gen2:
         state_code = BinaryTools.unpack('uint8', x, 0x00)
         if state_code > 3:
             return cls.unhandled_entry_format(0x20, x)
-        pack_temp = BinaryTools.unpack('int8', x, 0x01)
+        pack_temp = cls.legacy_temp(BinaryTools.unpack('int8', x, 0x01))
         module_number = BinaryTools.unpack('uint8', x, 0x02)
         if state_code == 0:
             event, state = 'Batt Temp Okay', 'okay'
@@ -5195,7 +5203,7 @@ class Gen2:
         return {
             'event': event,
             'structured_data': structured_data,
-            'conditions': 'Pack Temp: {t} C, Module: {m}'.format(t=pack_temp, m=module_number)
+            'conditions': 'Pack Temp: {t} C, Module: {m}'.format(t=text_or_na(pack_temp), m=module_number)
         }
 
     @classmethod

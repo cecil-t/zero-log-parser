@@ -106,10 +106,10 @@ def test_pack_temps_below_freezing():
 
 
 def test_pack_temp_invalid_thermistor_value():
-    # -100 C (byte 9c), the firmware's invalid-thermistor value, kept as-is (was 156 C).
+    # -100 C (byte 9c), the firmware's invalid-thermistor value: no reading.
     out = _decode(0x3c, _status_payload(pack_hi=-100, pack_lo=-100))
-    assert out['structured_data']['pack_temp_high_celsius'] == -100
-    assert 'PackTemp: h -100C, l -100C' in out['conditions']
+    assert out['structured_data']['pack_temp_high_celsius'] is None
+    assert 'PackTemp: h n/aC, l n/aC' in out['conditions']
 
 
 def test_pack_temps_above_freezing_unchanged():

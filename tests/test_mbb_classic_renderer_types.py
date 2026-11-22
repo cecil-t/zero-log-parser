@@ -134,9 +134,9 @@ def test_0x1e_high_temp_matches_paired_0x20():
     assert (p['structured_data']['pack_temp_celsius'], p['structured_data']['module_number']) == (50, 0)
 
 
-def test_0x1e_invalid_thermistor_kept_as_is():
+def test_0x1e_invalid_thermistor_is_no_reading():
     d = _decode(0x1e, SAMPLE_1E_INVALID_THERMISTOR)['structured_data']
-    assert d['pack_temp_celsius'] == -100
+    assert d['pack_temp_celsius'] is None
 
 
 def test_0x1f_low_temp_signed_and_matches_paired_0x20():
