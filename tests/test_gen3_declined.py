@@ -23,7 +23,7 @@ def _entry(message_type, timestamp, payload):
 
 
 def _cell_payload(length=43, shift=0, subsecond_us=432_000, sequence=17, prefix_marker=0xf9,
-                  low=3811, unloaded=0, high=3829, soc=63, current_ma=-4321, pack_mv=104_567):
+                  low=3811, unloaded=3807, high=3829, soc=63, current_ma=-4321, pack_mv=104_567):
     """A valid BMS cell telemetry payload (0x4B 43/45, 0x4C 61/63 with shift 4,
     0x4D 69/71 with shift 8), every decoded field at a distinct value."""
     p = bytearray(length)

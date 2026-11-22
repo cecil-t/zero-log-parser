@@ -3744,12 +3744,20 @@ class Gen2:
 
         status, status_conditions = cls.bms_telemetry_status_fields(message_type, x)
         structured_data.update(status)
+        # Written while the BMS sleeps: the record says so (sleep indicator)
+        # and holds no unloaded-cell reading, and its SOC and current are not
+        # readings either (SOC 0, current 0). The pack and cell voltages are
+        # real and stay.
+        if voltage_unloaded == 0 and status.get('bms_sleeping') is True:
+            structured_data['voltage_unloaded_cell_volts'] = None
+            structured_data['state_of_charge_percent'] = None
+            structured_data['battery_current_amps'] = None
         structured_data['raw_hex'] = bytes(x).hex()
 
         conditions = (
-            f"SOC:{soc}%, Vlow:{voltage_low}mV, Vhigh:{voltage_high}mV, "
+            f"SOC:{text_or_na(structured_data['state_of_charge_percent'])}%, Vlow:{voltage_low}mV, Vhigh:{voltage_high}mV, "
             + (f"Vpack:{text_or_na(structured_data['pack_voltage_volts'], '.3f')}V, " if not short else '')
-            + f"I:{structured_data['battery_current_amps']:.3f}A"
+            + f"I:{text_or_na(structured_data['battery_current_amps'], '.3f')}A"
         )
         if status_conditions:
             conditions += ', ' + status_conditions
