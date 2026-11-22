@@ -108,6 +108,7 @@ class ProcessedLogEntry:
     uptime_s: Optional[int] = None            # Seconds since power-on, when the raw value is one
     time_source: Optional[str] = None         # "clock", "backfilled", "uptime" (None: no raw time)
     time_repair: Optional[str] = None         # "page_marker": clock value rebuilt (Gen2.marker_clock_low_bits)
+    time_note: Optional[str] = None           # why an entry has no usable date (Gen2.label_time_notes)
     # Gen3 text restored from the shipped template table (see Gen2.gen3_text_message)
     text_restored: bool = False
     restored_spans: Optional[list] = None      # [{offset, length, text}], offsets into the restored message
@@ -1315,6 +1316,26 @@ class Gen2:
             payload['_order'] = (anchor, dated, i)
             out.append((sort_ts, payload, entry_num))
         return out
+
+    # Bytes of the event log header marker (a2 a2 a2 a2). An entry next to
+    # the ring-buffer seam can take its time bytes from it.
+    SEAM_MARKER_BYTES = b'\xa2\xa2'
+
+    @classmethod
+    def label_time_notes(cls, collected):
+        """Set payload['time_note'] on invalid entries, after
+        assign_legacy_times, to say why they have no usable date. The dates
+        themselves are not changed.
+          "seam": the time bytes hold the event log header marker
+          (SEAM_MARKER_BYTES), so they come from the ring-buffer seam, not
+          from a clock.
+        collected: the (sort_timestamp, payload, entry_num) list."""
+        for _ts, payload, _num in collected:
+            raw = payload.get('raw_timestamp')
+            if payload.get('time_source') != 'invalid' or raw is None:
+                continue
+            if cls.SEAM_MARKER_BYTES in struct.pack('<I', raw):
+                payload['time_note'] = 'seam'
 
     @classmethod
     def bms_discharge_level(cls, x):
@@ -7227,6 +7248,7 @@ class LogData(object):
                         marker_clock[k] = low
             collected_entries = Gen2.assign_legacy_times(collected_entries, self.timezone_offset,
                                                          clock_floor=clock_floor, marker_clock=marker_clock)
+            Gen2.label_time_notes(collected_entries)
 
             # FST/Gen3 only: drop entries whose bytes repeat an earlier entry
             # (Gen2.find_duplicate_entries). log_version REV3 also covers
@@ -7290,7 +7312,8 @@ class LogData(object):
                     raw_timestamp=entry_payload.get('raw_timestamp'),
                     uptime_s=entry_payload.get('uptime_s'),
                     time_source=entry_payload.get('time_source'),
-                    time_repair=entry_payload.get('time_repair')
+                    time_repair=entry_payload.get('time_repair'),
+                    time_note=entry_payload.get('time_note')
                 )
                 processed_entries.append(processed_entry)
 
@@ -8290,6 +8313,8 @@ class LogData(object):
             json_entry['time_source'] = entry.time_source
             if entry.time_repair is not None:
                 json_entry['time_repair'] = entry.time_repair
+            if entry.time_note is not None:
+                json_entry['time_note'] = entry.time_note
 
             json_output['entries'].append(json_entry)
 
