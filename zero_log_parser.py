@@ -1446,7 +1446,10 @@ class Gen2:
         fit = BinaryTools.unpack_fit
         old_mv = fit('uint16', x, 0x00)
         new_mv = fit('uint16', x, 0x02)
-        corrfact = fit('uint8', x, 0x04)
+        # Signed 16-bit: bytes 4-5 are its low and high byte, and the high
+        # byte is 0xFF exactly when the low byte's top bit is set (-11 read as
+        # one unsigned byte showed 245).
+        corrfact = fit('int16', x, 0x04)
 
         # Build structured data
         structured_data = {
