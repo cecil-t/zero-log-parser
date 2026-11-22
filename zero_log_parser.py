@@ -6487,6 +6487,70 @@ class Gen2:
         kept = [c for i, c in enumerate(collected) if i not in drop]
         return [(ts, payload, n) for n, (ts, payload, _) in enumerate(kept)]
 
+    # Some early FST/Gen3 BMS logs (131,200-byte files, BMS firmware 8-11)
+    # store each 128-byte page many times in a row, and what was logged
+    # between two distinct pages is not in the file. An entry that runs past
+    # the end of its page then continues with bytes of whatever page was
+    # stored next, usually not its own: text or the header of another entry.
+    # A file has this layout when more than REPEATED_PAGE_SHARE of its pages
+    # repeat the page before (fst_bms_page_stats).
+    REPEATED_PAGE_SHARE = 0.10
+
+    @classmethod
+    def is_repeated_page_layout(cls, buf):
+        """True when more than REPEATED_PAGE_SHARE of buf's 128-byte pages
+        after the header page are byte-identical to the page before."""
+        stats = cls.fst_bms_page_stats(buf)
+        return stats['total_pages'] > 0 and stats['repeated_pages'] > cls.REPEATED_PAGE_SHARE * stats['total_pages']
+
+    @classmethod
+    def withhold_spliced_fields(cls, buf, collected, spans, parsers):
+        """In a repeated-page layout file: for each decoded 0x4B/0x4C/0x4D
+        entry that crosses a 128-byte page boundary where the entry stream
+        does not continue (the byte after the entry is not the next entry's
+        0xb2), withhold every structured field whose bytes lie at or after the
+        boundary (set to None and listed in corrupted_fields). Those bytes
+        belong to another page. collected and spans as the walk builds them;
+        parsers is _entry_parsers() for the file. Returns the number of
+        entries changed."""
+        changed = 0
+        for (_ts, payload, _num), span in zip(collected, spans):
+            structured_data = payload.get('structured_data')
+            if span is None or not structured_data:
+                continue
+            start, length = span
+            end = start + length
+            boundary = (start // cls.PAGE_SIZE + 1) * cls.PAGE_SIZE
+            if end <= boundary or (end < len(buf) and buf[end] == 0xb2):
+                continue
+            escaped = bytes(buf[start + 2:end])
+            try:
+                block = BinaryTools.unescape_block(bytearray(escaped))
+            except Exception:
+                continue
+            message_type = cls.type_from_block(block)
+            entry_parser = parsers.get(message_type)
+            if message_type not in cls.MARKER_REPAIR_TYPES or entry_parser is None:
+                continue
+            message = bytes(block[0x05:])
+            rel = boundary - (start + 2)
+            lo = cls._unescaped_index_map(escaped)[rel] - 5 if rel >= 0 else -5
+            baseline = dict(cls._enumerate_structured_fields(structured_data))
+            if lo <= 0:
+                names = set(baseline)
+            else:
+                names = cls._fields_touching(entry_parser, message, lo, len(message), baseline)
+                if names is None:
+                    names = set(baseline)
+            names -= {'corrupted_fields'}
+            names = {n for n in names if n in baseline and baseline[n] is not None}
+            if not names:
+                continue
+            names |= set(structured_data.get('corrupted_fields') or [])
+            cls._withhold_payload_fields(structured_data, names)
+            changed += 1
+        return changed
+
     # Legacy MBB and BMS logs can hold whole blocks of entries a second time,
     # later in the buffer. Byte-identical entries are also common there for
     # real: every key-on writes the same uptime-0 records, a message can be
@@ -7275,6 +7339,17 @@ class LogData(object):
                 if len(kept) != len(collected_entries):
                     collected_entries = [collected_entries[k] for k in kept]
                     entry_spans = [entry_spans[k] for k in kept]
+
+            # Early FST/Gen3 BMS logs that store their pages many times over:
+            # fields read from another page's bytes are withheld
+            # (Gen2.withhold_spliced_fields)
+            if self.log_version == REV3 and dispatch_log_type == LogFile.log_type_bms \
+                    and Gen2.is_fst_platform_file(self.log_file.raw()) \
+                    and not Gen2.is_paged_bms_format(self.entries) \
+                    and len(entry_spans) == len(collected_entries) \
+                    and Gen2.is_repeated_page_layout(self.entries):
+                Gen2.withhold_spliced_fields(self.entries, collected_entries, entry_spans,
+                                             Gen2._entry_parsers(dispatch_log_type, gen3_text=True))
 
             # FST/Gen3 MBB telemetry: some fields depend on the firmware
             # revision each entry was written under, which needs the whole

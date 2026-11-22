@@ -94,7 +94,7 @@ These fields contain extracted motorcycle information when available:
 | `distinct_pages` | Pages after the header page that are distinct by exact content, not counting blank pages (one byte value throughout) or marker-plus-erased pages (`00 f0 ff 00` followed by 0xFF) |
 | `repeated_pages` | Pages after the header page that are byte-identical to the page before, not counting blank or marker-plus-erased pages |
 
-A normal file has nearly as many distinct pages as pages, and few or no repeated pages. In some early Gen3 BMS logs most pages are copies of the page before: the file holds only the distinct pages' entries, and what was logged between them is not in the file, so those logs have far fewer entries than their size suggests.
+A normal file has nearly as many distinct pages as pages, and few or no repeated pages. In some early Gen3 BMS logs most pages are copies of the page before: the file holds only the distinct pages' entries, and what was logged between them is not in the file, so those logs have far fewer entries than their size suggests. In those logs an entry that runs past the end of its page continues with bytes of whatever page was stored next. For a 0x4B, 0x4C or 0x4D entry whose page is not continued there (the next entry does not start right after it), every field read from bytes past the page end is withheld: its value is `null` and its name is listed in `structured_data.corrupted_fields`.
 
 ## Entry Structure
 
