@@ -325,6 +325,32 @@ The parser automatically detects and structures various telemetry data types. Be
 - Values the controller or BMS group marks as not reporting are null
 - 0x51 entries carry `vehicle_state` instead of `telemetry_tier` and `state`; they no longer carry `temperature_1_celsius` .. `temperature_4_celsius` (unsigned-byte copies of the four named temperatures)
 
+#### Gen3 Charging State (0x49)
+
+**Event:** `Charging State` (written with every CHRG-state telemetry entry)
+```json
+{
+  "subsecond_us": 640000, "sequence": 60, "marker": 251,
+  "charge_voltage_target_volts": 117.6,
+  "charge_target_pct": 70,
+  "charge_current_amps": 12.0,
+  "evse_disconnect_flags": 0,
+  "schedule_enabled": false,
+  "schedule_window_a_duration_min": 0, "schedule_window_a_start_min": 0,
+  "schedule_window_b_duration_min": 0, "schedule_window_b_start_min": 0,
+  "charging_enabled": true,
+  "evse_allowed_current_amps": 16,
+  "hard_charge_voltage_target_volts": 106.0,
+  "raw_hex": "..."
+}
+```
+
+- `charge_target_pct`: the owner's charge target in force; null when the record says no limit (127). The bike does not always stop there: some charges continue past it
+- `charge_current_amps`: total charge current; logged in mA up to MBB firmware rev 15. Null when the firmware revision the entry was written under is not known
+- Schedule windows: the charge schedule in 30-minute slots, given in minutes (start from midnight, and duration). Window A holds the charger in WAIT, window B is when charging starts. They are logged with scheduling off too. Null for entries written under firmware before rev 13, where these bytes are not schedule values
+- `hard_charge_voltage_target_volts`: null when 0 (disabled)
+- Two fields of the record are not decoded and stay in `raw_hex`: payload bytes 10-11 (the EVSE pilot current per the datasheet, not established) and 13-14 (the charger output current per the datasheet; it reads about half the charge current in most entries, so what it measures is not established)
+
 #### Module Registration
 
 **Event:** `Module 00 Registered`  

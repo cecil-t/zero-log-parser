@@ -39,6 +39,7 @@ def _decoder_lengths():
         'bms_storage_stats': {0x0f: (Gen2.BMS_STORAGE_STATS_LENGTH,)},
         'high_motor_controller_temp': {0x26: (Gen2.HIGH_MOTOR_CONTROLLER_TEMP_LENGTH,)},
         'charger_info': {0x48: charger},
+        'charging_state': {0x49: (Gen2.CHARGING_STATE_LEN,)},
         'gen3_firmware_build_info': {0x4e: Gen2.GEN3_FIRMWARE_BUILD_INFO_LENGTHS},
         'state_snapshot': {t: (v[1],) for t, v in Gen2.STATE_SNAPSHOT_TIERS.items()},
         'bms_cell_telemetry': {t: v[1] + tuple(n for (st, n) in Gen2.BMS_CELL_TELEMETRY_SHORT if st == t)
@@ -118,6 +119,10 @@ def _payload(message_type, length):
         for key, offset in Gen2.TELEMETRY_TAIL_FIELDS.get((message_type, length), {}).items():
             if key == 'speed':
                 struct.pack_into('<I', buf, tag + offset, 3942 * Gen2.TELEMETRY_SPEED_STEP)
+    elif message_type == 0x49:                              # charging state: flags 0/1, slot values, a target
+        buf[12] = 80
+        buf[19], buf[20], buf[25] = 0, 0, 1
+        buf[21:25] = bytes((14, 34, 20, 42))
     elif message_type in (0x4b, 0x4c, 0x4d) and (message_type, length) in {
             (t, v[1]) for t, v in Gen2.STATE_SNAPSHOT_TIERS.items()}:
         tag = Gen2.STATE_SNAPSHOT_TIERS[message_type][2]
@@ -178,6 +183,10 @@ def _output(message_type, length, payload):
     if message_type == 0x48:
         # the charger currents need the firmware revision the entry was written under
         result = Gen2.charger_info(bytearray(payload), firmware=Gen3TelemetryFirmware(30), timestamp=0)
+        return (result.get('event'), result.get('conditions'), _flatten(result.get('structured_data') or {}))
+    if message_type == 0x49:
+        # the charge current and the schedule windows need the firmware revision the entry was written under
+        result = Gen2.charging_state(bytearray(payload), firmware=Gen3TelemetryFirmware(30), timestamp=0)
         return (result.get('event'), result.get('conditions'), _flatten(result.get('structured_data') or {}))
     if (message_type, length) in Gen2.TELEMETRY_COLDEST_REPEAT:
         # payload byte 80 is decoded only on MBB firmware rev 15 and earlier

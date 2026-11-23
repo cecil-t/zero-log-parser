@@ -3426,6 +3426,87 @@ class Gen2:
             'structured_data': structured_data
         }
 
+    # Entry type 0x49: charging state, written with every CHRG-state
+    # telemetry entry. One fixed 31-byte payload: the shared 6-byte prefix
+    # (fst_entry_prefix), then (offsets from payload byte 6, field names after
+    # John Myers' (atomicdog) Gen3 log format datasheet):
+    #   0x00 u32 charging target, mV (117,600; 117,400 at rev 6-11)
+    #   0x04 u16 not decoded: the datasheet's EVSE pilot current; values run
+    #        to 157 and rarely equal the allowed current, so not established
+    #   0x06 u8  owner's charge target, % SOC; 127 means no limit
+    #   0x07 u16 not decoded: the datasheet's total charger output current;
+    #        it is about 0.4-0.5 of the charge current in most entries, on
+    #        one-charger bikes too, so what it measures is not established
+    #   0x09 s32 charge current, A (mA when written under rev 15 or earlier)
+    #   0x0D u8  EVSE disconnect flags, 0 = connected
+    #   0x0E u8  scheduled charging enabled (0/1)
+    #   0x0F 4 x u8 charge schedule in 30-minute slots: window A duration,
+    #        window A start, window B duration, window B start. Window A
+    #        holds the charger in WAIT, window B is when charging starts. It
+    #        is logged with scheduling off too. Only from rev 13: at rev 6-11
+    #        these bytes are not slot values (up to 178).
+    #   0x13 u8  charging enabled (0/1)
+    #   0x14 u8  EVSE allowed current, A
+    #   0x15 u32 hard charge target, mV, 0 = disabled
+    CHARGING_STATE_LEN = 31
+    CHARGING_TARGET_NO_LIMIT = 127
+    CHARGING_SCHEDULE_MIN_REV = 13
+    CHARGING_SCHEDULE_SLOT_MIN = 30
+
+    @classmethod
+    def charging_state(cls, x, firmware=None, timestamp=None):
+        """Type 0x49 - charging state (31 bytes), see the comment above.
+
+        The charge current and the schedule windows depend on the MBB
+        firmware revision the entry was written under (firmware.rev_at); with
+        no firmware context they are None here and Gen3TelemetryFirmware.
+        redecode fills them in. A payload that is not 31 bytes, or whose
+        sub-second value is out of range, falls back to the raw-hex report."""
+        if len(x) != cls.CHARGING_STATE_LEN:
+            return cls.unhandled_entry_format(0x49, x)
+        prefix = cls.fst_entry_prefix(x)
+        if prefix['subsecond_us'] > cls.FST_SUBSECOND_MAX_US:
+            return cls.unhandled_entry_format(0x49, x)
+        rev = firmware.rev_at(timestamp) if firmware is not None and timestamp is not None else None
+        rev = rev if isinstance(rev, int) else None
+        p = x[6:]
+
+        def flag(value):
+            return None if value not in (0, 1) else bool(value)
+
+        target = p[6]
+        current = BinaryTools.unpack('int32', p, 0x09)
+        hard = BinaryTools.unpack('uint32', p, 0x15)
+        structured_data = dict(prefix)
+        structured_data.update({
+            'charge_voltage_target_volts': BinaryTools.unpack('uint32', p, 0x00) / 1000.0,
+            'charge_target_pct': None if target == cls.CHARGING_TARGET_NO_LIMIT or target > 100 else target,
+            'charge_current_amps': None if rev is None else
+                (current / 1000.0 if rev <= cls.CHARGER_CURRENT_MA_MAX_REV else float(current)),
+            'evse_disconnect_flags': p[0x0D],
+            'schedule_enabled': flag(p[0x0E]),
+        })
+        slots = p[0x0F:0x13]
+        windows = rev is not None and rev >= cls.CHARGING_SCHEDULE_MIN_REV \
+            and slots[0] <= 48 and slots[1] < 48 and slots[2] <= 48 and slots[3] < 48
+        for i, name in enumerate(('schedule_window_a_duration_min', 'schedule_window_a_start_min',
+                                  'schedule_window_b_duration_min', 'schedule_window_b_start_min')):
+            structured_data[name] = slots[i] * cls.CHARGING_SCHEDULE_SLOT_MIN if windows else None
+        structured_data.update({
+            'charging_enabled': flag(p[0x13]),
+            'evse_allowed_current_amps': p[0x14],
+            'hard_charge_voltage_target_volts': None if hard == 0 else hard / 1000.0,
+            'raw_hex': bytes(x).hex(),
+        })
+        sd = structured_data
+        conditions = 'Target:%s, I:%s, Vtarget:%.1fV, Schedule:%s' % (
+            'none' if sd['charge_target_pct'] is None else '%d%%' % sd['charge_target_pct'],
+            'n/a' if sd['charge_current_amps'] is None else '%gA' % sd['charge_current_amps'],
+            sd['charge_voltage_target_volts'],
+            'on' if sd['schedule_enabled'] else 'off')
+        # a periodic record, like the 0x48 and 0x51-0x53 telemetry, not a state change
+        return {'event': 'Charging State', 'conditions': conditions, 'structured_data': structured_data, 'log_level': 'INFO'}
+
     # Entry type 0x4E: FST/Gen3 firmware build info, the same role as the
     # classic MBB's already-decoded type 0x32 (Gen2.firmware_build_info):
     # a build date/time string followed by a flash bank identifier
@@ -4203,6 +4284,22 @@ class Gen2:
             (5, 7, 'field', 'voltage_high_cell_volts'),
             (7, 9, 'field', 'voltage_balance_mv'),
             (9, 10, 'field', 'bms_temp_celsius'),
+        ),
+        (0x49, 31): (
+            (0, 4, 'field', 'subsecond_us'),
+            (4, 5, 'field', 'sequence'),
+            (5, 6, 'field', 'marker'),
+            (6, 10, 'field', 'charge_voltage_target_volts'),
+            (10, 12, 'unknown', 'not understood yet (EVSE pilot current per the datasheet)'),
+            (12, 13, 'field', 'charge_target_pct'),
+            (13, 15, 'unknown', 'not understood yet (charger output current per the datasheet)'),
+            (15, 19, 'field', 'charge_current_amps'),
+            (19, 20, 'field', 'evse_disconnect_flags'),
+            (20, 21, 'field', 'schedule_enabled'),
+            (21, 25, 'field', 'schedule windows'),
+            (25, 26, 'field', 'charging_enabled'),
+            (26, 27, 'field', 'evse_allowed_current_amps'),
+            (27, 31, 'field', 'hard_charge_voltage_target_volts'),
         ),
         (0x26, 6): (
             (0, 2, 'field', 'motor_temp_celsius'),
@@ -5841,6 +5938,7 @@ class Gen2:
             0x3c: cls.disarmed_status,
             0x3d: cls.contactor_closed_or_precharge_failed,
             0x48: cls.charger_info,             # Type 72
+            0x49: cls.charging_state,           # Type 73
             0x4b: lambda m: cls.state_snapshot_dispatch(0x4b, m),  # Type 75
             0x4c: lambda m: cls.state_snapshot_dispatch(0x4c, m),  # Type 76
             0x4d: lambda m: cls.state_snapshot_dispatch(0x4d, m),  # Type 77
@@ -6873,6 +6971,15 @@ class Gen3TelemetryFirmware:
         return bytearray(head + b''.join(bytes.fromhex(c['raw_hex']) for c in structured['chargers']))
 
     @classmethod
+    def _decoded_charging_state(cls, payload):
+        """The payload bytes of a 0x49 entry charging_state accepted, else None."""
+        structured = payload.get('structured_data')
+        if payload.get('message_type') != '0x49' or not structured or 'charge_target_pct' not in structured \
+                or payload.get('original_timestamp') is None:
+            return None
+        return bytearray.fromhex(structured['raw_hex'])
+
+    @classmethod
     def from_entries(cls, header_rev, payloads):
         updates = []
         first_x100 = None
@@ -6900,13 +7007,20 @@ class Gen3TelemetryFirmware:
 
     @classmethod
     def redecode(cls, collected_entries, header_rev):
-        """Decode the 0x51 / 0x52 / 0x53 entries of collected_entries
-        ((sort_timestamp, entry, entry_num) tuples from one file) again with
-        the file's firmware context, replacing event, conditions and
-        structured_data in place."""
+        """Decode the 0x48, 0x49 and 0x51 / 0x52 / 0x53 entries of
+        collected_entries ((sort_timestamp, entry, entry_num) tuples from one
+        file) again with the file's firmware context, replacing event,
+        conditions and structured_data in place."""
         payloads = [entry for _sort, entry, _num in collected_entries]
         firmware = cls.from_entries(header_rev, payloads)
         for entry in payloads:
+            charging = cls._decoded_charging_state(entry)
+            if charging is not None:
+                result = Gen2.charging_state(charging, firmware=firmware, timestamp=entry['original_timestamp'])
+                entry['event'] = result['event']
+                entry['conditions'] = result['conditions']
+                entry['structured_data'] = result['structured_data']
+                continue
             charger = cls._decoded_charger(entry)
             if charger is not None:
                 result = Gen2.charger_info(charger, firmware=firmware, timestamp=entry['original_timestamp'])
