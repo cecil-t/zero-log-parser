@@ -1626,9 +1626,11 @@ class Gen2:
         fit = BinaryTools.unpack_fit
         old_mv = fit('uint16', x, 0x00)
         new_mv = fit('uint16', x, 0x02)
-        # Signed 16-bit: bytes 4-5 are its low and high byte, and the high
-        # byte is 0xFF exactly when the low byte's top bit is set (-11 read as
-        # one unsigned byte showed 245).
+        # Signed 16-bit: bytes 4-5 are its low and high byte (-11 read as one
+        # unsigned byte showed 245). The high byte is usually 0xFF when the
+        # low byte's top bit is set, but not always: some BMS builds write
+        # 0x00 there with the low byte at 0x80 or above, and those rows read
+        # 128 to 255, which fit the rows around them as real values.
         corrfact = fit('int16', x, 0x04)
 
         # Build structured data
