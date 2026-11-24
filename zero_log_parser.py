@@ -1780,8 +1780,20 @@ class Gen2:
                               'S_A1', 'DS_A1', 'SR_A2', 'DSR_A2', 'S_AUS', 'DS_AUS'])
     MODEL_CODE_RE = re.compile(r'[A-Z0-9_]+')
     FIRMWARE_VERSION_RE = re.compile(r'[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*')
-    # The firmware's own not-set value for a board serial.
+    # The firmware's own not-set value for a board serial. Fields narrower
+    # than it hold its start (a pack serial field reads UNINITIA), so any
+    # prefix of at least UNSET_SERIAL_MIN_PREFIX characters is that value too.
     UNSET_SERIALS = frozenset(['UNINITIALIZED'])
+    UNSET_SERIAL_MIN_PREFIX = 6
+
+    @classmethod
+    def is_unset_serial(cls, value):
+        """True for the firmware's not-set serial value, or a prefix of it
+        at least UNSET_SERIAL_MIN_PREFIX characters long."""
+        if not isinstance(value, str):
+            return False
+        value = value.strip('\x00 ')
+        return len(value) >= cls.UNSET_SERIAL_MIN_PREFIX and any(u.startswith(value) for u in cls.UNSET_SERIALS)
 
     @classmethod
     def model_text(cls, value):
@@ -1864,7 +1876,7 @@ class Gen2:
         try:
             serial = BinaryTools.unpack_str(x, 53 + shift, count=16)
             structured_data['serial_number'] = serial if serial and BinaryTools.is_printable(serial) else 'Unknown'
-            if serial in cls.UNSET_SERIALS:
+            if cls.is_unset_serial(serial):
                 structured_data['serial_number'] = None   # the firmware's not-set value
         except Exception:
             structured_data['serial_number'] = 'Unknown'
@@ -5249,8 +5261,8 @@ class Gen2:
         # Only the Registered event carries the pack serial. In the other
         # events these bytes are a constant of the MBB firmware (3c ff 00,
         # 78 0b 00 or 08 0c 00), not a serial.
-        if event != 0x02:
-            printable_serial_no = None
+        if event != 0x02 or cls.is_unset_serial(printable_serial_no):
+            printable_serial_no = None   # (or the firmware's not-set value)
 
         event_name = events.get(event, 'Unknown' if event is None else 'Unknown (0x{:02x})'.format(event))
 
@@ -8289,9 +8301,11 @@ class LogData(object):
         # log text fragments and binary bytes from a damaged header are not.
         if 'Model' in sys_info:
             sys_info['Model'] = Gen2.model_text(sys_info['Model'])
-        # A serial the firmware never set reads UNINITIALIZED: not a serial.
-        if sys_info.get('Serial number') in Gen2.UNSET_SERIALS:
-            sys_info['Serial number'] = 'Unknown'
+        # A serial the firmware never set reads UNINITIALIZED (or its start,
+        # in a narrower field): not a serial.
+        for key in ('Serial number', 'BMS serial number', 'Pack serial number'):
+            if Gen2.is_unset_serial(sys_info.get(key)):
+                sys_info[key] = 'Unknown'
         self.vin_source = self.settle_vin(sys_info, header_vin)
 
         # log_info.platform: 'gen3' for files that start with an FST/Gen3
