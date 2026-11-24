@@ -5623,6 +5623,76 @@ class Gen2:
         }
 
     @classmethod
+    def high_throttle_disable(cls, x):
+        """Type 0x02: "High Throttle Disable.     thr   = %u mV", 2 bytes: one
+        uint16 LE, the throttle voltage in mV (the classic MBB firmware's own
+        renderer reads it with its u16 helper at offset 0). Logged at key-on,
+        next to the contactor closing, when the throttle reads above its
+        closed position; the drive is held off until it is released."""
+        if len(x) != 2:
+            return cls.unhandled_entry_format(0x02, x)
+        thr_volt = convert_mv_to_v(BinaryTools.unpack('uint16', x, 0x00))
+        return {
+            'event': 'High Throttle Disable',
+            'structured_data': {
+                'thr_voltage_volts': thr_volt,
+            },
+            'conditions': 'thr: {t:.3f}V'.format(t=thr_volt),
+        }
+
+    @classmethod
+    def mbb_bms_isolation_fault(cls, x):
+        """Type 0x31: "BMS Isolation Fault        BMS: %d", 1 byte: uint8, the
+        number of the battery module (BMS) that reported the fault (the
+        classic MBB firmware's renderer reads byte 0)."""
+        if len(x) != 1:
+            return cls.unhandled_entry_format(0x31, x)
+        module_number = BinaryTools.unpack('uint8', x, 0x00)
+        return {
+            'event': 'MBB BMS Isolation Fault',
+            'structured_data': {
+                'module_number': module_number,
+            },
+            'conditions': 'BMS: {m}'.format(m=module_number),
+        }
+
+    # Type 0x3e: ten (C, B) pairs. A pair the firmware did not fill holds -100
+    # in both values (the first pairs of a short sequence).
+    PRECHARGE_PAIRS = 10
+    PRECHARGE_PAIR_UNSET = -100
+
+    @classmethod
+    def precharge_voltage_pairs(cls, x):
+        """Type 0x3e: ten pairs of int32 LE values in mV, printed by the
+        classic MBB firmware's renderer as "C:%6d B:%6d" (C at offset 8n, B
+        at 8n+4), 80 bytes. The firmware's labels are kept: C and B. B is the
+        pack voltage (it agrees with the pack voltage of the nearest status
+        row); C rises towards B across the pairs and meets it as the
+        contactor closes, the shape of a precharge (inferred: the capacitor
+        voltage). A pair holding -100 in both values was not filled and is
+        None. The event keeps its existing name."""
+        if len(x) != 8 * cls.PRECHARGE_PAIRS:
+            return cls.unhandled_entry_format(0x3e, x)
+        structured_data = {}
+        parts = []
+        for n in range(cls.PRECHARGE_PAIRS):
+            c = BinaryTools.unpack('int32', x, 8 * n)
+            b = BinaryTools.unpack('int32', x, 8 * n + 4)
+            if c == cls.PRECHARGE_PAIR_UNSET and b == cls.PRECHARGE_PAIR_UNSET:
+                c_volt = b_volt = None
+            else:
+                c_volt, b_volt = convert_mv_to_v(c), convert_mv_to_v(b)
+            structured_data['c_voltage_{}_volts'.format(n + 1)] = c_volt
+            structured_data['b_voltage_{}_volts'.format(n + 1)] = b_volt
+            parts.append('C{n}: {c} B{n}: {b}'.format(
+                n=n + 1, c=text_or_na(c_volt, '.3f'), b=text_or_na(b_volt, '.3f')))
+        return {
+            'event': 'Cell Voltages',
+            'structured_data': structured_data,
+            'conditions': ', '.join(parts),
+        }
+
+    @classmethod
     def bms_disable_low_bat(cls, x):
         """Type 0x1c: "BMS Disable - Low Bat", 8 bytes: uint32 pack sum mV,
         uint8 capacity %, uint8 module, uint16 status."""
@@ -6064,7 +6134,7 @@ class Gen2:
         parsers = {
             # Unknown entry types to be added when defined: type, length, source, example
             0x01: cls.board_status,
-            # 0x02: unknown, 2, 6350_MBB_2016-04-12, 0x02 0x2e 0x11 ???
+            # 0x02, 0x31, 0x3e: classic MBB types, added below for files that are not BMS
             0x03: cls.bms_discharge_level,
             0x04: cls.bms_charge_full,
             0x05: BinaryTools.bms_unknown_type_5,
@@ -6095,7 +6165,6 @@ class Gen2:
             0x2d: cls.charging_status,
             0x2f: cls.sevcon_status,
             0x30: cls.charger_status,
-            # 0x31: unknown, 1, 6350_MBB_2016-04-12, 0x31 0x00 ???
             0x32: cls.firmware_build_info,
             0x33: cls.battery_status,
             0x34: cls.power_state,
@@ -6128,6 +6197,14 @@ class Gen2:
             # starts with the shared 6-byte prefix, so the message is not at
             # byte 0. Legacy files keep debug_message() untouched.
             parsers[0xfd] = lambda m: cls.gen3_debug_message(m, log_type)
+        if log_type != LogFile.log_type_bms:
+            # Classic MBB types with no BMS meaning: in BMS files these ids
+            # are only misframed bytes, so they stay unregistered there.
+            # Unknown Type is included because most 0x3e entries are in
+            # classic MBB files whose header does not say MBB.
+            parsers[0x02] = cls.high_throttle_disable
+            parsers[0x31] = cls.mbb_bms_isolation_fault
+            parsers[0x3e] = cls.precharge_voltage_pairs
         if log_type == LogFile.log_type_mbb:
             parsers[0x10] = cls.mbb_throttle_enable_wire_disable
             parsers[0x11] = cls.mbb_throttle_enable_wire_reenable

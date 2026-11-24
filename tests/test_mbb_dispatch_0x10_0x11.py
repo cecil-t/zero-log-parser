@@ -136,13 +136,15 @@ def test_entry_parsers_log_type_does_not_disturb_other_type_ids():
     default_parsers = Gen2._entry_parsers()
     mbb_parsers = Gen2._entry_parsers(LogFile.log_type_mbb)
     bms_parsers = Gen2._entry_parsers(LogFile.log_type_bms)
-    assert set(default_parsers) == set(mbb_parsers) == set(bms_parsers)  # same ids dispatched either way
+    # same ids dispatched either way, apart from the classic MBB types that
+    # are not registered for BMS files
+    assert set(default_parsers) == set(mbb_parsers) == set(bms_parsers) | {0x02, 0x31, 0x3e}
 
     # Direct classmethod references compare equal (bound-method equality)
     # across separate _entry_parsers() calls; lambda-wrapped entries
     # (0x1e/0x1f/0x4b/0x4c/0x4d/0x52/0x53) don't, since each call builds
     # fresh closures, so those are checked behaviorally below instead.
-    direct_ids = [t for t in default_parsers if t not in (0x10, 0x11)
+    direct_ids = [t for t in default_parsers if t not in (0x10, 0x11, 0x02, 0x31, 0x3e)
                   and default_parsers[t].__name__ != '<lambda>']
     assert direct_ids  # sanity: not every other id is a lambda
     for t in direct_ids:
