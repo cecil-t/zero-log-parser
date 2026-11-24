@@ -2519,7 +2519,7 @@ class Gen2:
             entry['restoration_reading'] = restored['reading']
             entry['template_id'] = restored['template_id']
             # the line as the unrestored decoder shows it (same prefix handling), original corrupted span included
-            entry['event_as_read'] = cls._debug_text_entry(rendered['display'], None)['event']
+            entry['event_as_read'] = cls._debug_text_entry(rendered['display'], None, fixed_prefix_cut=True)['event']
             if '\n' in entry['event']:
                 entry['event_has_newline'] = True
             return entry
@@ -2623,7 +2623,7 @@ class Gen2:
         return cls._gen3_text_structured(raw.decode('ascii'))
 
     @classmethod
-    def _debug_text_entry(cls, message, gen3_structured=None):
+    def _debug_text_entry(cls, message, gen3_structured=None, fixed_prefix_cut=False):
         """The content-based half of debug_message(), shared by the legacy
         path (message read from payload byte 0) and the Gen3 path (message
         from gen3_text_message()). gen3_structured, when given, is added as
@@ -2716,18 +2716,18 @@ class Gen2:
                         'conditions': message  # LEGACY: For backward compatibility
                     }
 
-        if message.startswith('DEBUG:'):
-            message = message[7:].strip()
-            log_level = 'DEBUG'
-        elif message.startswith('INFO:'):
-            message = message[6:].strip()
-            log_level = 'INFO'
-        elif message.startswith('ERROR:'):
-            message = message[7:].strip()
-            log_level = 'ERROR'
-        elif message.startswith('WARNING:'):
-            message = message[9:].strip()
-            log_level = 'WARNING'
+        # The level prefix and the space after it are removed. Only the
+        # prefix itself is cut, so a line whose next character is not a space
+        # (a marker span tag, "{corrupted: ...}" or "{restored: ...}", where
+        # the marker took the space) keeps that character.
+        # fixed_prefix_cut keeps the earlier cut of one character more, for
+        # event_as_read only, which is unchanged.
+        for prefix, level in (('DEBUG:', 'DEBUG'), ('INFO:', 'INFO'), ('ERROR:', 'ERROR'), ('WARNING:', 'WARNING')):
+            if message.startswith(prefix):
+                cut = len(prefix) + 1 if fixed_prefix_cut else len(prefix)
+                message = message[cut:].strip()
+                log_level = level
+                break
 
         # Check if this is a charger debug message and optimize it directly
         if message.startswith('Charger ') and 'SN:' in message and 'SW:' in message:
