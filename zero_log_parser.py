@@ -2825,6 +2825,20 @@ class Gen2:
             'event': 'Sevcon CAN Link Down'
         }
 
+    # Riding and Disarmed rows written before the battery reported: on a
+    # full-length record everything from the pack voltage to the odometer
+    # (payload bytes 4-26) is zero, while the pack temperatures, and on some
+    # rows the SOC, carry values. A pack of 0 V cannot be a reading, so that
+    # block was not written; the SOC is part of it when it is 0 too, and the
+    # two pack temperatures when the whole record is zero.
+    STATUS_FULL_LEN = 27
+
+    @classmethod
+    def status_block_unwritten(cls, x):
+        """True when a Riding or Disarmed record is full length and its
+        bytes 4-26 (pack voltage through odometer) are all zero."""
+        return len(x) >= cls.STATUS_FULL_LEN and not any(x[4:cls.STATUS_FULL_LEN])
+
     @classmethod
     def run_status(cls, x):
         mod_translate = {
@@ -2855,6 +2869,13 @@ class Gen2:
         motor_current = fit('int16', x, 0x13)
         ambient_temp = cls.legacy_temp(fit('int16', x, 0x15))
         odometer = BinaryTools.not_fill(fit('uint32', x, 0x17), 0xffffffff)
+        if cls.status_block_unwritten(x):
+            pack_voltage = motor_temp = controller_temp = rpm = battery_current = None
+            mods_raw = mods = motor_current = ambient_temp = odometer = None
+            if soc == 0:
+                soc = None
+            if not any(x[0:2]):
+                pack_temp_hi = pack_temp_low = None   # the whole record is zero
 
         # Build structured data dictionary
         structured_data = {
@@ -5324,6 +5345,13 @@ class Gen2:
         motor_current = fit('int8', x, 0x13)
         ambient_temp = cls.legacy_temp(fit('int16', x, 0x15))
         odometer = BinaryTools.not_fill(fit('uint32', x, 0x17), 0xffffffff)
+        if cls.status_block_unwritten(x):
+            pack_voltage = motor_temp = controller_temp = rpm = battery_current = None
+            mods = motor_current = ambient_temp = odometer = None
+            if soc == 0:
+                soc = None
+            if not any(x[0:2]):
+                pack_temp_hi = pack_temp_low = None   # the whole record is zero
 
         # Build structured data dictionary
         structured_data = {
