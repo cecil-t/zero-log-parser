@@ -1946,6 +1946,16 @@ class Gen2:
         switched_voltage_v = none_if_any_none(lambda v: v / 1000.0, switched_voltage)
         discharge_current_a = none_if_any_none(lambda v: v / 1000.0, discharge_current)
         precharge_percent = none_if_any_none(convert_ratio_to_percent, switched_voltage, pack_voltage)
+        # The pack voltage of the battery's own cells cannot be 0 V: a 0 there
+        # was not written. With the switched voltage also 0 that is unwritten
+        # too, and so is a current of 0 when all three are 0. A current next
+        # to a real pack voltage is kept.
+        if pack_voltage == 0:
+            pack_voltage = pack_voltage_v = precharge_percent = None
+            if switched_voltage == 0:
+                switched_voltage = switched_voltage_v = None
+                if discharge_current == 0:
+                    discharge_current = discharge_current_a = None
 
         # Build structured data dictionary
         structured_data = {
