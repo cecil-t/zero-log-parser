@@ -2176,10 +2176,17 @@ class Gen2:
                 else:
                     lo += tk[2]; hi += tk[3]
             skeleton = ''.join(tk[1] if tk[0] == 'lit' else '#' for tk in toks)
-            skeleton = re.sub(r'#+', '#', re.sub(r'\d+', '#', skeleton))
+            skeleton = cls._gen3_number_skeleton(skeleton)
             index.append({'id': t['id'], 'tokens': toks, 'lo': lo, 'hi': hi, 'skeleton': skeleton,
                           'kind': 'parameterized' if any(tk[0] == 'slot' for tk in toks) else 'strict'})
         return index
+
+    @staticmethod
+    def _gen3_number_skeleton(text):
+        """text with every number (a 0x hex value, or a run of digits) and every run of them shown
+        as one '#': the shape a damaged line's longest surviving piece must have inside a template's
+        own shape for the template to be tried."""
+        return re.sub(r'#+', '#', re.sub(r'0x[0-9A-Fa-f]*|\d+', '#', text))
 
     @classmethod
     def _gen3_text_templates(cls, board):
@@ -2296,7 +2303,7 @@ class Gen2:
         if inner_gaps and not lead_gap and not terminator_gap:
             readings.append(('inserted', ins))
         longest = max((v for k, v in segments if k == 't'), default='')
-        key = re.sub(r'#+', '#', re.sub(r'\d+', '#', longest))
+        key = cls._gen3_number_skeleton(longest)
         hits = {}
         for name, pat in readings:
             n = len(pat)

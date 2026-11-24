@@ -223,3 +223,21 @@ def test_template_table_is_tracked_by_git_not_ignored():
     if 'not a git repository' in out.stderr:
         return
     assert out.returncode == 0, out.stderr
+
+
+def test_shipped_table_restores_the_cellbox_crc_line():
+    # The cellbox CRC message prints crc_calc as hex (0x0E) and sometimes as a plain 0: the template's slot is hex.
+    _reset()
+    line = b'400000 baud: cellbox_id 0 CRC invalid. value: 0x02, crc_read: 0x20, crc_calc: 0x0E'
+    lost = line.index(b', crc_read')
+    entry = _parse(_gen3(line[:lost] + MARK + line[lost + 4:]), 'BMS')
+    assert entry['event'] == '400000 baud: cellbox_id 0 CRC invalid. value: 0x02{restored: , cr}c_read: 0x20, crc_calc: 0x0E'
+    assert entry['text_restored'] is True and entry['restoration_kind'] == 'parameterized'
+    # a lost character inside one of the numbers is never filled in
+    lost = line.index(b'0x0E')
+    entry = _parse(_gen3(line[:lost] + MARK), 'BMS')
+    assert not entry.get('text_restored')
+    lost = line.index(b'0x20')
+    entry = _parse(_gen3(line[:lost] + MARK + line[lost + 4:]), 'BMS')
+    assert not entry.get('text_restored') and '{corrupted: 4 bytes lost}' in entry['event']
+    _reset()

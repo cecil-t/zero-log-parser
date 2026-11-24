@@ -54,3 +54,12 @@ def test_output_is_deterministic_and_has_provenance():
 def test_segments_of_splits_a_display_line_on_its_corrupted_spans():
     assert segments_of('ab{corrupted: 4 bytes lost}cd') == [('t', 'ab'), ('gap', 4), ('t', 'cd')]
     assert segments_of('{corrupted: 3 bytes lost}x') == [('gap', 3), ('t', 'x')]
+
+
+def test_a_hex_slot_that_also_prints_a_plain_zero_stays_hex():
+    files = {'a': _file('BMS', **{'cellbox_id 0: 0x0E': 1}), 'b': _file('BMS', **{'cellbox_id 1: 0xF3': 1}),
+             'c': _file('BMS', **{'cellbox_id 1: 0': 1})}
+    assert build_templates(files, 2)['BMS'][0]['t'] == [['lit', 'cellbox_id '], ['N', 1, 1], ['lit', ': '], ['H', 1, 4]]
+    # a slot mixing hex with a value the hex characters cannot hold stays decimal
+    files['c'] = _file('BMS', **{'cellbox_id 1: -1': 1})
+    assert build_templates(files, 2)['BMS'][0]['t'][-1] == ['N', 2, 4]

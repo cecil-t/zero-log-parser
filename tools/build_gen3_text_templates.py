@@ -41,6 +41,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 NUMBER = re.compile(r'0x[0-9A-Fa-f]+|-?\d+(?:\.\d+)?')
 SLOT = '\x01'
+HEX_CHARS = frozenset('0123456789abcdefABCDEFx')
 
 
 def board_of(lf, head, size, zlp):
@@ -162,7 +163,10 @@ def build_templates(files, min_files=2):
                     if lit:
                         tokens.append(['lit', lit])
                     lens = [len(v) for v in values[i]]
-                    kind = 'H' if all(v.startswith('0x') for v in values[i]) else 'N'
+                    # 0x hex where any value is hex and every value fits the hex characters (a hex
+                    # field can print a plain 0); otherwise a decimal number
+                    kind = 'H' if (any(v.startswith('0x') for v in values[i])
+                                   and all(HEX_CHARS.issuperset(v) for v in values[i])) else 'N'
                     tokens.append([kind, min(lens), max(lens)])
                     lit = parts[i + 1]
                     nslots += 1
