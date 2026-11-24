@@ -6859,7 +6859,10 @@ class Gen2:
           the first 3 bytes of the otherwise-unexplained gap before the
           next real 0xb2 (at least 8 bytes total) and real data - not just
           fill - follows the marker; confirmed on 11,136 such gaps, 97.6%
-          of every gap this shape could apply to.
+          of every gap this shape could apply to. Where the marker sits
+          directly after a surviving 0xb2 (its length byte reads 0), that
+          0xb2 is not reported as a separate one-byte entry: the recovered
+          gap entry stands for it, and its entry number is left unused.
 
         Anything else - a marker elsewhere inside an otherwise normal
         entry, a gap that doesn't fit either shape, a marker on a page
@@ -6929,18 +6932,37 @@ class Gen2:
         # missing timestamp - true for every entry here, gap or type-
         # destroyed alike - from its neighbors' position in the list, not
         # from entry_num.
+        def header_destroyed(gap):
+            # The marker within the first 3 bytes of a gap of at least 8
+            # bytes, with real data (not just fill) after it: the marker's
+            # position in the gap, else None.
+            marker_pos = gap.find(cls.PAGE_MARKER)
+            if marker_pos != -1 and marker_pos <= 3 and len(gap) >= 8 and set(gap[marker_pos + 4:]) - {0xff}:
+                return marker_pos
+            return None
+
         prev_end = 0
-        for start, end, length in spans:
+        for i, (start, end, length) in enumerate(spans):
             gap = buf[prev_end:start]
             if gap:
-                marker_pos = gap.find(cls.PAGE_MARKER)
-                tail = gap[marker_pos + 4:] if marker_pos != -1 else b''
-                if (marker_pos != -1 and marker_pos <= 3 and len(gap) >= 8
-                        and set(tail) - {0xff}):
-                    add(cls._marker_corrupted_entry(' (header destroyed)', marker_pos + 4, tail), None)
+                marker_pos = header_destroyed(gap)
+                if marker_pos is not None:
+                    add(cls._marker_corrupted_entry(' (header destroyed)', marker_pos + 4, gap[marker_pos + 4:]), None)
                 # else: an unexplained gap - left unvisited, exactly like
                 # the normal walk already does for any resync gap.
             prev_end = end
+
+            # A 0xb2 followed directly by the marker is the surviving first
+            # byte of an entry whose length, type and time the marker
+            # overwrote. When the gap after it is recovered as that entry
+            # (header destroyed, above), the 0xb2 is not an entry of its own:
+            # it is skipped, and its entry number is left unused so the
+            # entries after it keep theirs.
+            if length == 0 and bytes(buf[start + 1:start + 5]) == cls.PAGE_MARKER:
+                next_start = spans[i + 1][0] if i + 1 < len(spans) else n
+                if header_destroyed(buf[end:next_start]) is not None:
+                    entry_num += 1
+                    continue
 
             try:
                 unescaped_block = BinaryTools.unescape_block(buf[start + 2:start + length])
