@@ -1365,6 +1365,27 @@ class Gen2:
                 run = []
         close()
 
+    # A Discharge level record whose values cannot all be readings: a cell
+    # (low, high, or a non-zero unloaded cell) above 5.0 V, the high cell
+    # below the low cell, SOC over 110, a pack over 135 V, or a current over
+    # 1,000 A. Real rows never show any of these (low cells and low packs are
+    # left alone: a deeply discharged pack can read that low). Such rows hold
+    # shifted bytes or text from a misframed entry.
+    DISCHARGE_LEVEL_DAMAGE_LIMITS = {'cell_mv': 5000, 'soc': 110, 'pack_mv': 135000, 'current_ua': 1_000_000_000}
+
+    @classmethod
+    def discharge_level_damaged(cls, x):
+        """True when a full-length Discharge level record fails one of the
+        tests above."""
+        if len(x) < 0x16:
+            return False
+        lim = cls.DISCHARGE_LEVEL_DAMAGE_LIMITS
+        low, high = BinaryTools.unpack('uint16', x, 0x0), BinaryTools.unpack('uint16', x, 0x2)
+        unloaded = BinaryTools.unpack('uint16', x, 0x14)
+        return (low > lim['cell_mv'] or high > lim['cell_mv'] or unloaded > lim['cell_mv'] or high < low
+                or x[0x0a] > lim['soc'] or BinaryTools.unpack('uint32', x, 0x0b) > lim['pack_mv']
+                or abs(BinaryTools.unpack('int32', x, 0x10)) > lim['current_ua'])
+
     @classmethod
     def bms_discharge_level(cls, x):
         bike_states = {
@@ -1400,6 +1421,9 @@ class Gen2:
             'pack_voltage_mv': pack_mv,  # For backward compatibility
             'mode': None if mode_code is None else bike_states.get(mode_code)
         }
+        # A damaged record: every value is withheld (null, listed in corrupted_fields)
+        if cls.discharge_level_damaged(x):
+            cls._withhold_payload_fields(structured_data, [k for k, v in structured_data.items() if v is not None])
 
         # Generate legacy conditions string for backward compatibility
         sd = structured_data
