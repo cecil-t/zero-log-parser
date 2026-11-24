@@ -4048,6 +4048,17 @@ class Gen2:
             structured_data['voltage_unloaded_cell_volts'] = None
             structured_data['state_of_charge_percent'] = None
             structured_data['battery_current_amps'] = None
+        # A record with no unloaded-cell reading and SOC 0 while the pack is
+        # at 100 V or more and both cells read 2.5-4.3 V: a pack that full is
+        # not at 0%, so the SOC was not reported, and neither was the unloaded
+        # cell. A current of 0 there is not a reading either; any other
+        # current is kept. The pack and cell voltages stay.
+        elif cls._cell_reading_not_reported(voltage_low, voltage_unloaded, voltage_high, soc,
+                                            structured_data.get('pack_voltage_volts')):
+            structured_data['voltage_unloaded_cell_volts'] = None
+            structured_data['state_of_charge_percent'] = None
+            if current_ma == 0:
+                structured_data['battery_current_amps'] = None
         structured_data['raw_hex'] = bytes(x).hex()
 
         conditions = (
@@ -4063,6 +4074,84 @@ class Gen2:
             'conditions': conditions,
             'structured_data': structured_data
         }
+
+    @staticmethod
+    def _cell_reading_not_reported(voltage_low, voltage_unloaded, voltage_high, soc, pack_volts):
+        """The rule above: no unloaded-cell reading, SOC 0, the pack at 100 V
+        or more and both cells 2.5-4.3 V."""
+        return (voltage_unloaded == 0 and soc == 0 and (pack_volts or 0) >= 100
+                and 2500 <= voltage_low <= 4300 and 2500 <= voltage_high <= 4300)
+
+    # The fields that rule reads, as (offset from the block base, length).
+    CELL_RULE_FIELD_BYTES = {
+        'voltage_low_cell_volts': (0, 2),
+        'voltage_unloaded_cell_volts': (2, 2),
+        'voltage_high_cell_volts': (4, 2),
+        'state_of_charge_percent': (6, 1),
+        'battery_current_amps': (7, 4),
+        'pack_voltage_volts': (25, 3),
+    }
+
+    @classmethod
+    def _cell_rule_fields_in(cls, message_type, lo, hi):
+        """Of the fields the not-reported rule reads, those with a byte in
+        payload[lo:hi]."""
+        base = cls.BMS_CELL_TELEMETRY_FIELD_BASE + cls.BMS_CELL_TELEMETRY_TIERS[message_type][0]
+        return {name for name, (a, n) in cls.CELL_RULE_FIELD_BYTES.items() if base + a < hi and lo < base + a + n}
+
+    @classmethod
+    def _cell_rule_fields_changed(cls, message_type, message, modified):
+        """Of the fields the not-reported rule reads, those whose own bytes
+        differ between message and modified (every one when the lengths
+        differ)."""
+        if len(message) != len(modified):
+            return set(cls.CELL_RULE_FIELD_BYTES)
+        base = cls.BMS_CELL_TELEMETRY_FIELD_BASE + cls.BMS_CELL_TELEMETRY_TIERS[message_type][0]
+        return {name for name, (a, n) in cls.CELL_RULE_FIELD_BYTES.items()
+                if bytes(message[base + a:base + a + n]) != bytes(modified[base + a:base + a + n])}
+
+    CELL_RULE_INPUTS = frozenset(['voltage_low_cell_volts', 'voltage_unloaded_cell_volts', 'voltage_high_cell_volts',
+                                  'state_of_charge_percent', 'pack_voltage_volts'])
+
+    @classmethod
+    def _restore_cell_rule_readings(cls, structured_data, message_type, message, damaged, withheld):
+        """For a 0x4B/0x4C/0x4D record where bytes of a field the
+        not-reported rule decides on are damaged (damaged: the damaged field
+        names, from _cell_rule_fields_changed): whether the rule applies then
+        rests on bytes that are not the record's, in the record's own decode
+        or in the filled decodes that find the damaged fields. So the unloaded
+        cell, SOC and current whose own bytes are intact are shown at the
+        record's own values and taken out of withheld (the set of field names
+        about to be withheld); those whose own bytes are damaged are added to
+        it. Mutates both. When the sleep fields are withheld as well, the
+        three are withheld. Records where no input of the rule is damaged,
+        and records written while the BMS sleeps, are left alone."""
+        if message_type not in cls.BMS_CELL_TELEMETRY_TIERS:
+            return
+        outputs = ('voltage_unloaded_cell_volts', 'state_of_charge_percent', 'battery_current_amps')
+        if withheld & {'bms_sleeping', 'bms_sleep_indicator'}:
+            # The sleep reading is damaged too, so whether these were taken
+            # at all is not known: they are withheld.
+            if structured_data.get('voltage_unloaded_cell_volts') is None:
+                withheld.update(outputs)
+            return
+        if not damaged & cls.CELL_RULE_INPUTS or structured_data.get('bms_sleeping') is True:
+            return
+        base = cls.BMS_CELL_TELEMETRY_FIELD_BASE + cls.BMS_CELL_TELEMETRY_TIERS[message_type][0]
+        if len(message) < base + 11:
+            return
+        raw = {
+            'voltage_unloaded_cell_volts': BinaryTools.unpack('uint16', message, base + 2) / 1000.0,
+            'state_of_charge_percent': BinaryTools.unpack('uint8', message, base + 6),
+            'battery_current_amps': BinaryTools.unpack('int32', message, base + 7) / 1000.0,
+        }
+        already = set(structured_data.get('corrupted_fields') or ())
+        for name, value in raw.items():
+            if name in damaged:
+                withheld.add(name)
+            elif name not in already:
+                structured_data[name] = value
+                withheld.discard(name)
 
     @classmethod
     def _short_cell_record_shape(cls, x, base):
@@ -6252,6 +6341,9 @@ class Gen2:
         touched = cls._fields_touching(entry_parser, realigned, max(lo - 1, 0), min(hi, len(realigned)), baseline)
         if touched is None:
             return None
+        cls._restore_cell_rule_readings(structured_data, message_type, realigned,
+                                        cls._cell_rule_fields_in(message_type, max(lo - 1, 0), min(hi, len(realigned))),
+                                        touched)
         cls._withhold_payload_fields(structured_data, touched)
         return entry
 
@@ -6316,6 +6408,11 @@ class Gen2:
             return
 
         contaminated = set()
+        rule_damaged = set()
+        try:
+            original_message = bytes(BinaryTools.unescape_block(bytearray(raw_escaped))[0x05:])
+        except Exception:
+            original_message = None
         for filler in (0x00, 0xAA):
             modified = bytearray(raw_escaped)
             for rel_start, rel_end in marker_at:
@@ -6347,7 +6444,11 @@ class Gen2:
             for path in set(baseline_fields) | set(modified_fields):
                 if baseline_fields.get(path, _missing) != modified_fields.get(path, _missing):
                     contaminated.add(path)
+            if original_message is not None and message_type in cls.BMS_CELL_TELEMETRY_TIERS:
+                rule_damaged |= cls._cell_rule_fields_changed(message_type, original_message, modified_unescaped[0x05:])
 
+        if rule_damaged:
+            cls._restore_cell_rule_readings(structured_data, message_type, original_message, rule_damaged, contaminated)
         if contaminated:
             for path in contaminated:
                 cls._set_structured_field(structured_data, path, None)
@@ -6670,7 +6771,12 @@ class Gen2:
                     names = set(baseline)
             names -= {'corrupted_fields'}
             names = {n for n in names if n in baseline and baseline[n] is not None}
+            damaged = cls._cell_rule_fields_in(message_type, lo, len(message))
+            before = {k: structured_data.get(k) for k in cls.CELL_RULE_FIELD_BYTES}
+            cls._restore_cell_rule_readings(structured_data, message_type, message, damaged, names)
+            restored = any(structured_data.get(k) != v for k, v in before.items())
             if not names:
+                changed += restored
                 continue
             names |= set(structured_data.get('corrupted_fields') or [])
             cls._withhold_payload_fields(structured_data, names)
